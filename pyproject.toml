@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xlsx2bpmn"
+version = "1.1.0"
+description = "Таблица процесса <-> BPMN 2.0 XML с координатами. Работает офлайн."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["openpyxl>=3.1"]
+
+[project.scripts]
+xlsx2bpmn = "xlsx2bpmn.cli:main"
+bpmn2xlsx = "xlsx2bpmn.cli:main"
+
+[tool.setuptools]
+packages = ["xlsx2bpmn"]
+
+[tool.setuptools.package-data]
+xlsx2bpmn = ["template.xlsx", "prompt.md"]
