@@ -159,7 +159,7 @@ class Pipe:
         return ""
 
     @staticmethod
-    def _attached(body: dict, text: str) -> tuple[str, str]:
+    def _attached(body: dict, text: str) -> tuple[str, str, str]:
         """Текст приложенного файла и его имя.
 
         Open WebUI кладёт разобранный текст в data.content — тогда берём его.
@@ -167,8 +167,9 @@ class Pipe:
         разбираются docx, pdf, pptx и прочее.
         """
         if BPMN_RE.search(text or ""):
-            return text, "вставлено в чат"
+            return text, "вставлено в чат", ""
 
+        problem = ""
         for item in body.get("files") or []:
             holder = item.get("file") if isinstance(item.get("file"), dict) else item
             data = holder.get("data") if isinstance(holder.get("data"), dict) else {}
@@ -177,17 +178,20 @@ class Pipe:
 
             content = data.get("content") or holder.get("content") or ""
             if isinstance(content, str) and content.strip():
-                return content, name
+                return content, name, ""
 
             for key in ("path", "file_path"):
                 path = holder.get(key) or data.get(key)
                 if not path:
                     continue
                 try:
-                    return read_document(Path(path).read_bytes(), name), name
-                except (ConvertError, OSError):
-                    continue
-        return "", ""
+                    return read_document(Path(path).read_bytes(), name), name, ""
+                except ConvertError as exc:
+                    problem = str(exc)
+                except OSError:
+                    problem = (f"Файл «{name}» не удалось открыть на сервере. "
+                               f"Попробуйте вставить описание текстом.")
+        return "", "", problem
 
     # ----------------------------------------------------------------- вывод
 
@@ -284,7 +288,10 @@ class Pipe:
                     "Похоже, пакет установлен не полностью — переустановите колесо.")
 
         # --- что прислали: диаграмму или описание процесса -----------------
-        attached, source = self._attached(body, request)
+        attached, source, problem = self._attached(body, request)
+        if problem and not request.strip():
+            await say("Файл не прочитан", True)
+            return problem
         diagram = attached if BPMN_RE.search(attached or "") else ""
         if attached and not diagram:
             await say(f"Читаю «{source}»…")

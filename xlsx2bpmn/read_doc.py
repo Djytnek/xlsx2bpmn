@@ -53,16 +53,24 @@ def read_document(data: bytes, name: str = "") -> str:
         return text
 
     try:
-        from markitdown import MarkItDown
+        from markitdown import MarkItDown, MissingDependencyException
     except ImportError:
         raise ConvertError(NO_LIBRARY.format(ext=ext or "этого формата")) from None
 
     try:
         result = MarkItDown().convert_stream(io.BytesIO(data),
                                              file_extension=ext or None)
+    except MissingDependencyException:
+        raise ConvertError(
+            f"Файлы {ext} читать нечем: markitdown установлен без нужного "
+            f"дополнения. Доставьте его командой:\n"
+            f'  pip install "markitdown[docx,pdf,pptx,xlsx]"') from None
     except Exception as exc:                                   # noqa: BLE001
-        raise ConvertError(f"Не удалось прочитать документ {name or ''}: "
-                           f"{type(exc).__name__}: {exc}") from exc
+        raise ConvertError(
+            f"Не удалось прочитать файл «{name or 'без имени'}». Скорее всего "
+            f"он повреждён, защищён паролем или на самом деле другого формата. "
+            f"Пришлите описание процесса текстом или другим файлом.\n"
+            f"(техническая причина: {type(exc).__name__})") from exc
 
     text = (result.text_content or "").strip()
     if not text:
