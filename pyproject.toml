@@ -8,13 +8,11 @@ version = "1.1.0"
 description = "Таблица процесса <-> BPMN 2.0 XML с координатами. Работает офлайн."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["openpyxl>=3.1"]
+dependencies = ["openpyxl>=3.1", "pillow>=10.0"]
 
 [project.optional-dependencies]
 # чтение описаний процесса из docx, pdf, pptx и прочего
 docs = ["markitdown[docx,pdf,pptx,xlsx]>=0.1"]
-# отрисовка схемы в png (svg работает и без этого)
-png = ["cairosvg>=2.7"]
 
 [project.scripts]
 xlsx2bpmn = "xlsx2bpmn.cli:main"
@@ -24,4 +22,4 @@ bpmn2xlsx = "xlsx2bpmn.cli:main"
 packages = ["xlsx2bpmn"]
 
 [tool.setuptools.package-data]
-xlsx2bpmn = ["template.xlsx", "prompt.md"]
+xlsx2bpmn = ["template.xlsx", "prompt.md", "DejaVuSans.ttf"]

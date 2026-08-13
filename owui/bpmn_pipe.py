@@ -87,10 +87,6 @@ class Pipe:
         OUTPUT_DIR: str = Field(
             default="/app/backend/data/bpmn",
             description="Куда складывать готовые .bpmn и .svg")
-        PICTURE: str = Field(
-            default="auto",
-            description="Картинка в чате: auto (png, если получится, иначе svg), "
-                        "png или svg. Файлы сохраняются в обоих видах всегда")
         SHOW_TABLE: bool = Field(
             default=False,
             description="Показывать таблицу в ответе. Обычно менеджеру не нужна")
@@ -254,15 +250,13 @@ class Pipe:
         except Exception:                                          # noqa: BLE001
             svg = ""
 
-        png = b""
-        if svg and self.valves.PICTURE in ("auto", "png"):
-            try:
-                png = to_png(xml)
-            except Exception:                                      # noqa: BLE001
-                png = b""
+        try:
+            png = to_png(xml)
+        except Exception:                                          # noqa: BLE001
+            png = b""
 
         picture = ""
-        if png and self.valves.PICTURE != "svg":
+        if png:
             encoded = base64.b64encode(png).decode("ascii")
             picture = f"![Схема процесса](data:image/png;base64,{encoded})\n\n"
         elif svg:
