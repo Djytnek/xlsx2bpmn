@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 
 from xlsx2bpmn import apply_layout, convert, layout_process, to_table
 from xlsx2bpmn.core import ConvertError
+from xlsx2bpmn.read_doc import read_document
 from xlsx2bpmn.render_svg import to_svg
 
 try:                                    # промпт лежит внутри пакета
@@ -158,17 +159,35 @@ class Pipe:
         return ""
 
     @staticmethod
-    def _attached(body: dict, text: str) -> str:
-        """Содержимое приложенного файла или вставленного в чат XML."""
+    def _attached(body: dict, text: str) -> tuple[str, str]:
+        """Текст приложенного файла и его имя.
+
+        Open WebUI кладёт разобранный текст в data.content — тогда берём его.
+        Если положил только путь, читаем файл сами через markitdown: так
+        разбираются docx, pdf, pptx и прочее.
+        """
         if BPMN_RE.search(text or ""):
-            return text
+            return text, "вставлено в чат"
+
         for item in body.get("files") or []:
             holder = item.get("file") if isinstance(item.get("file"), dict) else item
             data = holder.get("data") if isinstance(holder.get("data"), dict) else {}
+            name = (holder.get("filename") or holder.get("name")
+                    or data.get("name") or "документ")
+
             content = data.get("content") or holder.get("content") or ""
-            if content:
-                return content
-        return ""
+            if isinstance(content, str) and content.strip():
+                return content, name
+
+            for key in ("path", "file_path"):
+                path = holder.get(key) or data.get(key)
+                if not path:
+                    continue
+                try:
+                    return read_document(Path(path).read_bytes(), name), name
+                except (ConvertError, OSError):
+                    continue
+        return "", ""
 
     # ----------------------------------------------------------------- вывод
 
@@ -256,15 +275,22 @@ class Pipe:
                 request = (content or "").strip()
                 break
         if not request and not (body.get("files") or []):
-            return ("Опишите процесс словами — или пришлите файл .bpmn, "
-                    "чтобы я его разобрал.")
+            return ("Опишите процесс словами или приложите документ с "
+                    "регламентом — понимаю docx, pdf, pptx, xlsx, html, "
+                    "txt и md. Готовую схему .bpmn тоже разберу.")
 
         if not PROMPT:
             return ("Не найден файл prompt.md внутри пакета xlsx2bpmn. "
                     "Похоже, пакет установлен не полностью — переустановите колесо.")
 
-        # --- обратный ход: прислали готовую диаграмму ----------------------
-        diagram = self._attached(body, request)
+        # --- что прислали: диаграмму или описание процесса -----------------
+        attached, source = self._attached(body, request)
+        diagram = attached if BPMN_RE.search(attached or "") else ""
+        if attached and not diagram:
+            await say(f"Читаю «{source}»…")
+            note = request.strip()
+            request = attached if not note or len(note) < 15 else f"{attached}\n\n{note}"
+
         if diagram:
             await say("Разбираю присланную схему…")
             try:
