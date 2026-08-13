@@ -21,6 +21,7 @@ from pathlib import Path
 from .core import ConvertError, convert
 from .layout import LayoutError, apply_layout
 from .layout_native import layout_process
+from .render_png import to_png
 from .render_svg import to_svg
 from .to_table import to_table, to_workbook
 
@@ -34,16 +35,20 @@ def _looks_like_bpmn(data: bytes) -> bool:
 
 
 def _draw(xml: str, out: Path, args) -> str:
-    """Рисует картинку рядом с результатом, если попросили ключом --svg."""
-    if not args.svg:
-        return ""
-    picture = out.with_suffix(".svg")
-    try:
-        picture.write_text(to_svg(xml), encoding="utf-8")
-    except (ConvertError, OSError) as exc:
-        print(f"WARN картинка не нарисована: {exc}", file=sys.stderr)
-        return ""
-    return f" + {picture.name}"
+    """Рисует картинки рядом с результатом по ключам --svg и --png."""
+    made = []
+    for wanted, suffix, render in ((args.svg, ".svg", lambda: to_svg(xml).encode("utf-8")),
+                                   (args.png, ".png", lambda: to_png(xml))):
+        if not wanted:
+            continue
+        picture = out.with_suffix(suffix)
+        try:
+            picture.write_bytes(render())
+        except (ConvertError, OSError) as exc:
+            print(f"WARN {suffix} не нарисован: {exc}", file=sys.stderr)
+            continue
+        made.append(picture.name)
+    return (" + " + " + ".join(made)) if made else ""
 
 
 def _table_one(path: Path, out: Path, args) -> int:
@@ -159,6 +164,8 @@ def main() -> int:
                     help="при разборе писать текстовую таблицу, а не .xlsx")
     ap.add_argument("--svg", action="store_true",
                     help="дополнительно нарисовать картинку .svg рядом с результатом")
+    ap.add_argument("--png", action="store_true",
+                    help="то же, но растром .png (нужен cairosvg)")
     ap.add_argument("--template", metavar="PATH",
                     help="создать пустой шаблон таблицы по этому пути и выйти")
     ap.add_argument("--sheet", default=None, help="имя листа (по умолчанию Process)")

@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 from xlsx2bpmn import apply_layout, convert, layout_process, to_table
 from xlsx2bpmn.core import ConvertError
 from xlsx2bpmn.read_doc import read_document
+from xlsx2bpmn.render_png import to_png
 from xlsx2bpmn.render_svg import to_svg
 
 try:                                    # промпт лежит внутри пакета
@@ -86,6 +87,10 @@ class Pipe:
         OUTPUT_DIR: str = Field(
             default="/app/backend/data/bpmn",
             description="Куда складывать готовые .bpmn и .svg")
+        PICTURE: str = Field(
+            default="auto",
+            description="Картинка в чате: auto (png, если получится, иначе svg), "
+                        "png или svg. Файлы сохраняются в обоих видах всегда")
         SHOW_TABLE: bool = Field(
             default=False,
             description="Показывать таблицу в ответе. Обычно менеджеру не нужна")
@@ -225,30 +230,46 @@ class Pipe:
             blocks.append(f"**Документы:** {', '.join(docs)}")
         return "\n\n".join(blocks)
 
-    def _save(self, xml: str, svg: str, table: str) -> list[str]:
+    def _save(self, xml: str, svg: str, png: bytes, table: str) -> list[str]:
         folder = Path(self.valves.OUTPUT_DIR)
         try:
             folder.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
             names = []
-            for suffix, content in ((".bpmn", xml), (".svg", svg), (".txt", table)):
+            parts = [(".bpmn", xml.encode("utf-8")), (".svg", svg.encode("utf-8")),
+                     (".txt", table.encode("utf-8"))]
+            if png:
+                parts.insert(2, (".png", png))
+            for suffix, content in parts:
                 path = folder / f"схема-{stamp}{suffix}"
-                path.write_text(content, encoding="utf-8")
+                path.write_bytes(content)
                 names.append(path.name)
             return names
         except OSError:
             return []
 
     def _reply(self, table: str, xml: str, note: str = "") -> str:
-        picture = ""
         try:
             svg = to_svg(xml)
-            encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
-            picture = f"![Схема процесса](data:image/svg+xml;base64,{encoded})\n\n"
         except Exception:                                          # noqa: BLE001
             svg = ""
 
-        saved = self._save(xml, svg, table) if svg else []
+        png = b""
+        if svg and self.valves.PICTURE in ("auto", "png"):
+            try:
+                png = to_png(xml)
+            except Exception:                                      # noqa: BLE001
+                png = b""
+
+        picture = ""
+        if png and self.valves.PICTURE != "svg":
+            encoded = base64.b64encode(png).decode("ascii")
+            picture = f"![Схема процесса](data:image/png;base64,{encoded})\n\n"
+        elif svg:
+            encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
+            picture = f"![Схема процесса](data:image/svg+xml;base64,{encoded})\n\n"
+
+        saved = self._save(xml, svg, png, table) if svg else []
         parts = [note] if note else []
         parts.append(picture + self._summary(table))
         if saved:

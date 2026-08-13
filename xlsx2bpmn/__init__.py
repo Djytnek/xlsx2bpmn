@@ -20,9 +20,11 @@ from .core import ConvertError, Issue, Result, convert
 from .layout import LayoutError, apply_layout
 from .layout_native import layout_process
 from .read_doc import read_document
+from .render_png import to_png
+from .render_svg import to_svg
 from .to_table import TableResult, to_table, to_workbook
 
 __version__ = "1.1.0"
 __all__ = ["convert", "apply_layout", "layout_process", "to_table", "to_workbook",
-           "read_document",
+           "read_document", "to_svg", "to_png",
            "Result", "TableResult", "Issue", "ConvertError", "LayoutError"]
