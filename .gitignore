@@ -6,6 +6,5 @@ build/
 dist/
 wheels/
 *.bpmn
-bench/results.json
 *.svg
 owui/вывод/

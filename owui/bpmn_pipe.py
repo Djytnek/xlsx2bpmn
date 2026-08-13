@@ -68,16 +68,14 @@ EDIT = """Вот таблица процесса:
 class Pipe:
     class Valves(BaseModel):
         MODEL: str = Field(
-            default="qwen3.6:35b",
-            description="Модель, которая составляет таблицу. Имя как в Ollama.")
+            default="bpmn-worker",
+            description="Модель, которая составляет таблицу")
         BASE_URL: str = Field(
-            default="http://host.docker.internal:11434",
-            description="Адрес Ollama. Внутри Docker обычно host.docker.internal, "
-                        "на том же хосте — http://localhost:11434")
+            default="http://localhost:8080",
+            description="Адрес Open WebUI")
         API_PATH: str = Field(
-            default="/v1/chat/completions",
-            description="Путь к API. Для Ollama /v1/chat/completions, "
-                        "для Open WebUI /api/chat/completions")
+            default="/api/chat/completions",
+            description="Путь к API Open WebUI")
         API_KEY: str = Field(
             default="", description="Токен, если конечная точка его требует")
         REPAIRS: int = Field(
