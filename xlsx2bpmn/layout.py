@@ -422,9 +422,4 @@ def apply_layout(xml: str, layout_fn) -> tuple[str, list[str]]:
     for pid, single in docs:
         laid[pid] = layout_fn(single)
 
-    result, warnings = merge_layout(xml, laid, meta)
-    if any(n.tag == f"{B}subProcess" for p in ET.fromstring(xml).findall(f"{B}process")
-           for n in p.iter() if n.tag == f"{B}subProcess"):
-        warnings.append("субпроцессы разложены свёрнутыми: вложенное содержимое "
-                        "координат не получает")
-    return result, warnings
+    return merge_layout(xml, laid, meta)

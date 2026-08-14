@@ -85,7 +85,16 @@ def _table_one(path: Path, out: Path, args) -> int:
         print(f"{path.name}: ERROR не удалось записать {out}: {exc}", file=sys.stderr)
         return 2
 
-    picture = _draw(data.decode("utf-8-sig", "replace"), out, args)
+    # у присланной диаграммы координат может не быть — тогда рисуем по своей
+    source = data.decode("utf-8-sig", "replace")
+    if (args.svg or args.png) and "BPMNPlane" not in source:
+        rebuilt = convert(result.table.encode("utf-8"))
+        if rebuilt.ok:
+            try:
+                source, _ = apply_layout(rebuilt.xml, layout_process)
+            except LayoutError:
+                pass
+    picture = _draw(source, out, args)
     if not args.quiet:
         s = result.stats
         print(f"OK -> {out}{picture}  элементов {s['nodes']}, потоков {s['flows']}, "
@@ -165,7 +174,7 @@ def main() -> int:
     ap.add_argument("--svg", action="store_true",
                     help="дополнительно нарисовать картинку .svg рядом с результатом")
     ap.add_argument("--png", action="store_true",
-                    help="то же, но растром .png (нужен cairosvg)")
+                    help="то же, но растром .png")
     ap.add_argument("--template", metavar="PATH",
                     help="создать пустой шаблон таблицы по этому пути и выйти")
     ap.add_argument("--sheet", default=None, help="имя листа (по умолчанию Process)")
