@@ -5,9 +5,11 @@
 Контракт: на вход XML с одним процессом, на выход тот же XML
 с добавленным BPMNDiagram.
 
-Алгоритм послойный: по горизонтали узел ставится в колонку по длиннейшему пути
-от старта, по вертикали — в полосу своей дорожки. Стрелки не оптимизируются,
-зато результат предсказуем и не зависит ни от чего внешнего.
+Логика та же, что у bpmn-auto-layout. По горизонтали узел встаёт в колонку по
+длиннейшему пути от старта, поэтому слияние оказывается правее всех своих
+веток. По вертикали цепочка держится одной прямой: первая ветка развилки
+продолжает строку, каждая следующая уходит строкой ниже и дальше идёт по ней.
+Дорожки задают, в какой полосе всё это происходит.
 """
 from __future__ import annotations
 
@@ -30,6 +32,7 @@ SIZES = {
 TASK_SIZE = (100, 80)
 COL_GAP = 60          # зазор между колонками
 ROW_GAP = 40          # зазор между строками
+ROW_H = TASK_SIZE[1] + ROW_GAP   # шаг строки: цепочка идёт прямой
 LANE_PAD = 24         # отступ от содержимого дорожки до её границы
 LANE_MIN = 90         # высота пустой дорожки
 DETOUR_GAP = 16       # расстояние между параллельными обходами
@@ -44,25 +47,47 @@ def _size(tag: str) -> tuple[int, int]:
     return SIZES.get(tag, TASK_SIZE)
 
 
-def _order(cell: dict, columns: dict, lanes: int, in_edges: dict) -> None:
-    """Упорядочивает узлы внутри клетки так, чтобы стрелки меньше пересекались.
+def _rows(order: list, out_edges: dict, layer: dict, lane_of: dict,
+          attached: dict) -> dict[str, int]:
+    """Раскидывает узлы по строкам внутри дорожки.
 
-    Идём колонками слева направо; внутри клетки узел встаёт тем выше, чем выше
-    стояли его предшественники. Классическая barycenter-эвристика.
+    Правило то же, что у bpmn-auto-layout: первая ветка продолжает строку
+    предшественника — цепочка выходит прямой линией, — а каждая следующая
+    ветка развилки уходит на новую строку ниже и дальше идёт по ней.
     """
-    row: dict[str, float] = {}
-    for col in sorted(columns):
-        for lane in range(lanes):
-            members = cell.get((lane, col))
-            if not members:
-                continue
-            if len(members) > 1:
-                def height(node: str) -> float:
-                    known = [row[p] for p in in_edges.get(node, []) if p in row]
-                    return sum(known) / len(known) if known else 0.0
-                members.sort(key=height)
-            for index, node in enumerate(members):
-                row[node] = lane * 100 + index
+    row: dict[str, int] = {}
+    busy: set[tuple[int, int, int]] = set()      # (дорожка, строка, колонка)
+
+    def settle(node: str, want: int) -> int:
+        lane = lane_of.get(node, 0)
+        line = max(want, 0)
+        while (lane, line, layer[node]) in busy:
+            line += 1
+        row[node] = line
+        busy.add((lane, line, layer[node]))
+        return line
+
+    queue = deque(n for n in order if n not in attached)
+    while queue:
+        node = queue.popleft()
+        if node in row:
+            continue
+        line = settle(node, 0)
+        chain = deque([(node, line)])
+        while chain:                             # тянем цепочку от узла вперёд
+            current, current_line = chain.popleft()
+            lane = lane_of.get(current, 0)
+            nexts = [n for n in out_edges.get(current, [])
+                     if n not in row and n not in attached]
+            here = 0            # сколько веток уже осталось в этой же дорожке
+            for nxt in nexts:
+                if lane_of.get(nxt, 0) != lane:
+                    want = 0                     # в чужой дорожке — с её верха
+                else:
+                    want = current_line + here   # первая держит прямую,
+                    here += 1                    # следующие — сразу под ней
+                chain.append((nxt, settle(nxt, want)))
+    return row
 
 
 def _place(proc: ET.Element) -> tuple[dict, dict, dict, list]:
@@ -166,56 +191,37 @@ def _place(proc: ET.Element) -> tuple[dict, dict, dict, list]:
         col_x[col] = x_cursor
         x_cursor += col_w[col] + COL_GAP
 
-    def _stack(members: list[str]) -> float:
-        return (sum(_size(nodes[n])[1] for n in members)
-                + ROW_GAP * (len(members) - 1)) if members else 0.0
-
     # --- координаты ----------------------------------------------------------
     boxes: dict[str, tuple[float, float, int, int]] = {}
     floors: dict[str, float] = {}        # нижняя граница дорожки: обход не глубже
 
-    if lane_names:
-        # клетка (дорожка, колонка): узлы стопкой, дорожка задаёт полосу по Y
-        cell: dict[tuple[int, int], list[str]] = defaultdict(list)
-        for node in layout_nodes:
-            cell[(lane_of.get(node, 0), layer[node])].append(node)
-        _order(cell, columns, len(lane_names), in_edges)
+    row_of = _rows(seen_order, out_edges, layer, lane_of, attached)
 
-        # обходные стрелки идут понизу своей дорожки — заранее даём им место
-        detours: dict[int, int] = defaultdict(int)
-        for _, src, tgt in flows:
-            if src not in layer or tgt not in layer:
-                continue
-            host = attached.get(src)
-            lane_id = lane_of.get(host or src, 0)
-            if host or layer[tgt] <= layer[src] or layer[tgt] - layer[src] > 1:
-                detours[lane_id] += 1
+    # обходные стрелки идут понизу своей дорожки — заранее даём им место
+    detours: dict[int, int] = defaultdict(int)
+    for _, src, tgt in flows:
+        if src not in layer or tgt not in layer:
+            continue
+        host = attached.get(src)
+        if host or layer[tgt] <= layer[src] or layer[tgt] - layer[src] > 1:
+            detours[lane_of.get(host or src, 0)] += 1
 
-        y_cursor = 0.0
-        for index in range(len(lane_names)):
-            tallest = max((_stack(cell[(index, col)]) for col in columns),
-                          default=0.0)
-            reserve = detours[index] * DETOUR_GAP + (20 if detours[index] else 0)
-            band = max(tallest + 2 * LANE_PAD + reserve, LANE_MIN)
-            for col in sorted(columns):
-                members = cell[(index, col)]
-                if not members:
-                    continue
-                y = y_cursor + (band - reserve - _stack(members)) / 2
-                for node in members:
-                    w, h = _size(nodes[node])
-                    boxes[node] = (col_x[col] + (col_w[col] - w) / 2, y, w, h)
-                    floors[node] = y_cursor + band - 8
-                    y += h + ROW_GAP
-            y_cursor += band
-    else:
-        for col in sorted(columns):
-            members = columns[col]
-            y = -_stack(members) / 2
-            for node in members:
-                w, h = _size(nodes[node])
-                boxes[node] = (col_x[col] + (col_w[col] - w) / 2, y, w, h)
-                y += h + ROW_GAP
+    lanes = range(len(lane_names)) if lane_names else [0]
+    y_cursor = 0.0
+    for index in lanes:
+        members = [n for n in layout_nodes if lane_of.get(n, 0) == index]
+        rows = max((row_of[n] for n in members), default=-1) + 1
+        reserve = detours[index] * DETOUR_GAP + (20 if detours[index] else 0)
+        band = max(rows * ROW_H - ROW_GAP + 2 * LANE_PAD + reserve, LANE_MIN)
+        for node in members:
+            w, h = _size(nodes[node])
+            # по вертикали узел стоит в середине своей строки: цепочка выходит
+            # прямой линией, какой бы высоты ни были элементы
+            y = (y_cursor + LANE_PAD + row_of[node] * ROW_H
+                 + (TASK_SIZE[1] - h) / 2)
+            boxes[node] = (col_x[layer[node]] + (col_w[layer[node]] - w) / 2, y, w, h)
+            floors[node] = y_cursor + band - 8
+        y_cursor += band
 
     # --- граничные события: на нижней кромке хозяина -------------------------
     per_host: dict[str, int] = defaultdict(int)
