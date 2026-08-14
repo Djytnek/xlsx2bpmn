@@ -18,6 +18,7 @@ import shutil
 import sys
 from pathlib import Path
 
+from . import __version__
 from .core import ConvertError, convert
 from .layout import LayoutError, apply_layout
 from .layout_native import layout_process
@@ -162,6 +163,8 @@ def main() -> int:
         prog=prog or "xlsx2bpmn",
         description="Таблица процесса <-> BPMN 2.0 XML. Работает офлайн. "
                     "xlsx2bpmn собирает диаграмму, bpmn2xlsx разбирает её обратно.")
+    ap.add_argument("--version", action="version",
+                    version=f"xlsx2bpmn {__version__}")
     ap.add_argument("input", nargs="*", help="один или несколько файлов")
     ap.add_argument("-o", "--output", help="путь к результату (только для одного файла)")
     direction = ap.add_mutually_exclusive_group()
