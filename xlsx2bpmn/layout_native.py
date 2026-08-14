@@ -32,6 +32,7 @@ COL_GAP = 60          # зазор между колонками
 ROW_GAP = 40          # зазор между строками
 LANE_PAD = 24         # отступ от содержимого дорожки до её границы
 LANE_MIN = 90         # высота пустой дорожки
+DETOUR_GAP = 16       # расстояние между параллельными обходами
 SKIP = {"laneSet", "sequenceFlow", "dataObject", "dataObjectReference",
         "documentation", "extensionElements", "property", "ioSpecification",
         "dataInputAssociation", "dataOutputAssociation", "incoming", "outgoing",
@@ -41,6 +42,27 @@ SKIP = {"laneSet", "sequenceFlow", "dataObject", "dataObjectReference",
 
 def _size(tag: str) -> tuple[int, int]:
     return SIZES.get(tag, TASK_SIZE)
+
+
+def _order(cell: dict, columns: dict, lanes: int, in_edges: dict) -> None:
+    """Упорядочивает узлы внутри клетки так, чтобы стрелки меньше пересекались.
+
+    Идём колонками слева направо; внутри клетки узел встаёт тем выше, чем выше
+    стояли его предшественники. Классическая barycenter-эвристика.
+    """
+    row: dict[str, float] = {}
+    for col in sorted(columns):
+        for lane in range(lanes):
+            members = cell.get((lane, col))
+            if not members:
+                continue
+            if len(members) > 1:
+                def height(node: str) -> float:
+                    known = [row[p] for p in in_edges.get(node, []) if p in row]
+                    return sum(known) / len(known) if known else 0.0
+                members.sort(key=height)
+            for index, node in enumerate(members):
+                row[node] = lane * 100 + index
 
 
 def _place(proc: ET.Element) -> tuple[dict, dict, dict, list]:
@@ -156,6 +178,7 @@ def _place(proc: ET.Element) -> tuple[dict, dict, dict, list]:
         cell: dict[tuple[int, int], list[str]] = defaultdict(list)
         for node in layout_nodes:
             cell[(lane_of.get(node, 0), layer[node])].append(node)
+        _order(cell, columns, len(lane_names), in_edges)
 
         y_cursor = 0.0
         for index in range(len(lane_names)):
@@ -215,12 +238,13 @@ def _draw(plane: ET.Element, nodes: dict, attached: dict, boxes: dict,
         ET.SubElement(shape, f"{DC}Bounds", {
             "x": _n(x), "y": _n(y), "width": _n(w), "height": _n(h)})
 
+    slots = _slots(boxes, flows, attached)
     for fid, src, tgt in flows:
         if src not in boxes or tgt not in boxes:
             continue
         edge = ET.SubElement(plane, f"{DI}BPMNEdge",
                              {"id": f"{fid}_di", "bpmnElement": fid})
-        for x, y in _route(boxes[src], boxes[tgt], src in attached):
+        for x, y in _route(boxes[src], boxes[tgt], src in attached, slots.get(fid, 0)):
             ET.SubElement(edge, f"{D}waypoint", {"x": _n(x), "y": _n(y)})
 
 
@@ -265,15 +289,59 @@ def _n(value: float) -> str:
     return str(int(round(value)))
 
 
+def _detour(src: tuple[float, float, int, int], tgt: tuple[float, float, int, int],
+            from_boundary: bool) -> bool:
+    """Пойдёт ли стрелка обходом понизу — тогда ей нужна своя дорожка."""
+    sx, sy, sw, sh = src
+    tx, ty, tw, th = tgt
+    if from_boundary or tx + tw < sx:
+        return True
+    return tx > sx + sw and abs((sy + sh / 2) - (ty + th / 2)) < 1 \
+        and tx - (sx + sw) > COL_GAP * 1.6
+
+
+def _slots(boxes: dict, flows: list, attached: dict) -> dict[str, int]:
+    """Разводит обходные стрелки по параллельным дорожкам, чтобы не слипались.
+
+    Две стрелки могут делить дорожку, только если не пересекаются по X.
+    """
+    spans: list[tuple[float, float, str]] = []
+    for fid, src, tgt in flows:
+        if src not in boxes or tgt not in boxes:
+            continue
+        if not _detour(boxes[src], boxes[tgt], src in attached):
+            continue
+        sx, _, sw, _ = boxes[src]
+        tx, _, tw, _ = boxes[tgt]
+        left, right = sorted((sx + sw / 2, tx + tw / 2))
+        spans.append((left, right, fid))
+
+    spans.sort()
+    busy: list[list[tuple[float, float]]] = []
+    out: dict[str, int] = {}
+    for left, right, fid in spans:
+        for slot, taken in enumerate(busy):
+            if all(right <= a or left >= b for a, b in taken):
+                taken.append((left, right))
+                out[fid] = slot
+                break
+        else:
+            busy.append([(left, right)])
+            out[fid] = len(busy) - 1
+    return out
+
+
 def _route(src: tuple[float, float, int, int], tgt: tuple[float, float, int, int],
-           from_boundary: bool) -> list[tuple[float, float]]:
+           from_boundary: bool, slot: int = 0) -> list[tuple[float, float]]:
     sx, sy, sw, sh = src
     tx, ty, tw, th = tgt
     s_cx, s_cy = sx + sw / 2, sy + sh / 2
     t_cx, t_cy = tx + tw / 2, ty + th / 2
 
+    lane = slot * DETOUR_GAP
+
     if from_boundary:                                   # из граничного события — вниз
-        drop = max(sy + sh, ty + th) + 40
+        drop = max(sy + sh, ty + th) + 40 + lane
         return [(s_cx, sy + sh), (s_cx, drop), (t_cx, drop), (t_cx, ty + th)]
 
     if tx > sx + sw:                                    # вперёд
@@ -281,14 +349,14 @@ def _route(src: tuple[float, float, int, int], tgt: tuple[float, float, int, int
             if tx - (sx + sw) > COL_GAP * 1.6:
                 # перепрыгивает через колонку: между ними стоят другие узлы,
                 # поэтому обходим понизу, а не режем их насквозь
-                drop = max(sy + sh, ty + th) + 20
+                drop = max(sy + sh, ty + th) + 20 + lane
                 return [(s_cx, sy + sh), (s_cx, drop), (t_cx, drop), (t_cx, ty + th)]
             return [(sx + sw, s_cy), (tx, t_cy)]
         mid = (sx + sw + tx) / 2
         return [(sx + sw, s_cy), (mid, s_cy), (mid, t_cy), (tx, t_cy)]
 
     if tx + tw < sx:                                    # назад — обходим снизу
-        drop = max(sy + sh, ty + th) + 50
+        drop = max(sy + sh, ty + th) + 50 + lane
         return [(s_cx, sy + sh), (s_cx, drop), (t_cx, drop), (t_cx, ty + th)]
 
     if t_cy > s_cy:                                     # вниз в той же колонке

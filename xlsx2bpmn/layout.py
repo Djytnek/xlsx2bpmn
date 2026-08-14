@@ -250,22 +250,29 @@ def _place_data(shapes: list[ET.Element], edges: list[ET.Element],
         if ref_id in boxes:                      # раскладчик уже поставил
             taken.append(boxes[ref_id])
             continue
-        linked = [boxes[a] for _, _, r, a in info["assoc"] if r == ref_id and a in boxes]
-        if not linked:
+        # документ ставим над той задачей, которая его создаёт; если создателя
+        # нет — над первой, которая его читает
+        makers = [boxes[a] for _, d, r, a in info["assoc"]
+                  if r == ref_id and d == "out" and a in boxes]
+        readers = [boxes[a] for _, d, r, a in info["assoc"]
+                   if r == ref_id and d == "in" and a in boxes]
+        anchor = (makers or readers)[:1]
+        if not anchor:
             warnings.append(f"документ {name or ref_id!r} не привязан ни к одной "
                             f"разложенной задаче, значок не поставлен")
             continue
-        x = sum(b.cx for b in linked) / len(linked) - DOC_W / 2
-        above = min(b.y for b in linked) - DOC_GAP
-        below = max(b.bottom for b in linked) + DOC_GAP - DOC_H
+        x = anchor[0].cx - DOC_W / 2
+        above = anchor[0].y - DOC_GAP
+        below = anchor[0].bottom + DOC_GAP - DOC_H
 
-        # сперва над задачей, потом под ней, потом в стороны — но не поверх фигур
+        # Держимся строго над задачей, пока получается: сначала прямо над,
+        # потом прямо под, и только если и там занято — вбок.
         box = None
-        for base_y in (above, below):
-            for step in range(6):
-                for sign in (0, 1, -1) if step else (0,):
-                    candidate = Box(x + sign * step * (DOC_W + 24), base_y,
-                                    DOC_W, DOC_H)
+        for step in range(6):
+            shifts = (0,) if not step else (step, -step)
+            for base_y in (above, below):
+                for sign in shifts:
+                    candidate = Box(x + sign * (DOC_W + 24), base_y, DOC_W, DOC_H)
                     if _free(candidate, taken):
                         box = candidate
                         break
