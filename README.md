@@ -65,15 +65,15 @@ python selftest.py
 ### Обновление
 
 Новые возможности появляются регулярно, а `pip` сам за ними не следит —
-обновлять нужно вручную. Из папки с проектом:
+обновлять нужно вручную. Проще всего скачать заново: команды не зависят
+от того, в какой папке вы находитесь.
 
 ```bash
-cd xlsx2bpmn
-git pull
-pip install .
+cd /tmp && rm -rf xlsx2bpmn && git clone https://github.com/Djytnek/xlsx2bpmn.git
+pip install --force-reinstall "/tmp/xlsx2bpmn[docs]"
 ```
 
-Если ставили с дополнением — `pip install ".[docs]"`.
+Без дополнения — `pip install --force-reinstall /tmp/xlsx2bpmn`.
 
 Проверьте, что версия сменилась:
 
@@ -81,15 +81,19 @@ pip install .
 xlsx2bpmn --version
 ```
 
-> **Если ключ не сработал или его нет** — значит установлена старая версия,
-> а `git pull` или `pip install` не выполнены. Самый надёжный способ —
-> поставить с нуля:
->
-> ```bash
-> cd .. && rm -rf xlsx2bpmn
-> git clone https://github.com/Djytnek/xlsx2bpmn.git
-> cd xlsx2bpmn && pip install --force-reinstall .
-> ```
+> **Ключ не сработал или его нет** — значит обновление не прошло и осталась
+> старая версия. Смотрите на последнюю строку вывода `pip`: нужна
+> `Successfully installed`.
+
+Если вы работаете в самой папке проекта и правите код, обновляйтесь через
+`git pull` — но выполнять его нужно **внутри** склонированной папки, иначе
+git ответит `Stopping at filesystem boundary`:
+
+```bash
+cd /путь/куда/клонировали/xlsx2bpmn
+git pull
+pip install .
+```
 
 ### Установка без интернета
 
