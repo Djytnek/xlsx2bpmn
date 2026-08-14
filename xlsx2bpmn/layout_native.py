@@ -33,7 +33,9 @@ ROW_GAP = 40          # зазор между строками
 LANE_PAD = 24         # отступ от содержимого дорожки до её границы
 LANE_MIN = 90         # высота пустой дорожки
 SKIP = {"laneSet", "sequenceFlow", "dataObject", "dataObjectReference",
-        "documentation", "extensionElements", "property",
+        "documentation", "extensionElements", "property", "ioSpecification",
+        "dataInputAssociation", "dataOutputAssociation", "incoming", "outgoing",
+        "standardLoopCharacteristics", "multiInstanceLoopCharacteristics",
         "textAnnotation", "association", "group"}
 
 
@@ -41,13 +43,11 @@ def _size(tag: str) -> tuple[int, int]:
     return SIZES.get(tag, TASK_SIZE)
 
 
-def layout_process(xml: str) -> str:
-    """Единственная публичная функция. Идемпотентна по входу."""
-    root = ET.fromstring(xml)
-    proc = root.find(f"{B}process")
-    if proc is None:
-        raise ValueError("в документе нет process")
+def _place(proc: ET.Element) -> tuple[dict, dict, dict, list]:
+    """Расставляет координаты внутри одного контейнера — процесса или субпроцесса.
 
+    Возвращает (nodes, attached, boxes, flows).
+    """
     nodes: dict[str, str] = {}          # id -> имя тега
     attached: dict[str, str] = {}       # boundary id -> id хозяина
     for child in proc:
@@ -187,14 +187,12 @@ def layout_process(xml: str) -> str:
         dx, dy = 60 - min_x, 60 - min_y
         boxes = {k: (v[0] + dx, v[1] + dy, v[2], v[3]) for k, v in boxes.items()}
 
-    # --- запись DI -----------------------------------------------------------
-    for old in root.findall(f"{DI}BPMNDiagram"):
-        root.remove(old)
-    diagram = ET.SubElement(root, f"{DI}BPMNDiagram", {"id": "BPMNDiagram_1"})
-    plane = ET.SubElement(diagram, f"{DI}BPMNPlane", {
-        "id": "BPMNPlane_1", "bpmnElement": proc.get("id", ""),
-    })
+    return nodes, attached, boxes, flows
 
+
+def _draw(plane: ET.Element, nodes: dict, attached: dict, boxes: dict,
+          flows: list) -> None:
+    """Переносит посчитанные координаты в BPMNPlane."""
     for node, (x, y, w, h) in boxes.items():
         attrs = {"id": f"{node}_di", "bpmnElement": node}
         if nodes.get(node) == "subProcess":
@@ -212,6 +210,40 @@ def layout_process(xml: str) -> str:
                              {"id": f"{fid}_di", "bpmnElement": fid})
         for x, y in _route(boxes[src], boxes[tgt], src in attached):
             ET.SubElement(edge, f"{D}waypoint", {"x": _n(x), "y": _n(y)})
+
+
+def layout_process(xml: str) -> str:
+    """Единственная публичная функция. Идемпотентна по входу.
+
+    Кроме основного плана строит по отдельному плану на каждый субпроцесс —
+    так редакторы показывают его содержимое при раскрытии.
+    """
+    root = ET.fromstring(xml)
+    proc = root.find(f"{B}process")
+    if proc is None:
+        raise ValueError("в документе нет process")
+
+    for old in root.findall(f"{DI}BPMNDiagram"):
+        root.remove(old)
+
+    diagram = ET.SubElement(root, f"{DI}BPMNDiagram", {"id": "BPMNDiagram_1"})
+    plane = ET.SubElement(diagram, f"{DI}BPMNPlane", {
+        "id": "BPMNPlane_1", "bpmnElement": proc.get("id", ""),
+    })
+    _draw(plane, *_place(proc))
+
+    # содержимое субпроцессов: каждому своё полотно, чтобы редактор показал
+    # его при раскрытии
+    for index, sub in enumerate(proc.iter(f"{B}subProcess"), start=1):
+        nodes, attached, boxes, flows = _place(sub)
+        if not boxes:
+            continue
+        sub_diagram = ET.SubElement(root, f"{DI}BPMNDiagram",
+                                    {"id": f"BPMNDiagram_sub_{index}"})
+        sub_plane = ET.SubElement(sub_diagram, f"{DI}BPMNPlane", {
+            "id": f"BPMNPlane_sub_{index}", "bpmnElement": sub.get("id", ""),
+        })
+        _draw(sub_plane, nodes, attached, boxes, flows)
 
     ET.indent(root, space="  ")
     return ET.tostring(root, encoding="unicode", xml_declaration=True)

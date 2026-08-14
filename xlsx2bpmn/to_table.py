@@ -146,9 +146,12 @@ def _lane_map(proc: ET.Element, issues: list[Issue]) -> dict[str, str]:
 
 
 def _doc_map(proc: ET.Element) -> dict[str, str]:
-    """id ссылки на документ -> id самого документа (он же id строки таблицы)."""
+    """id ссылки на документ -> id самого документа (он же id строки таблицы).
+
+    Ищем по всему дереву: документы объявляют и внутри субпроцессов.
+    """
     out: dict[str, str] = {}
-    for ref in proc.findall(f"{B}dataObjectReference"):
+    for ref in proc.iter(f"{B}dataObjectReference"):
         rid = ref.get("id", "")
         out[rid] = ref.get("dataObjectRef") or rid
     return out
@@ -350,7 +353,7 @@ def to_table(xml: str | bytes, *, full: bool = False,
         _walk(proc, pool, "", lanes, docs, rows, defaults, issues)
 
         seen: set[str] = set()
-        for ref in proc.findall(f"{B}dataObjectReference"):
+        for ref in proc.iter(f"{B}dataObjectReference"):
             table_id = docs.get(ref.get("id", ""), ref.get("id", ""))
             if table_id in seen:
                 issues.append(Issue("warning", None,
@@ -358,7 +361,7 @@ def to_table(xml: str | bytes, *, full: bool = False,
                                     f"в таблице он будет один"))
                 continue
             seen.add(table_id)
-            obj = next((o for o in proc.findall(f"{B}dataObject")
+            obj = next((o for o in proc.iter(f"{B}dataObject")
                         if o.get("id") == table_id), None)
             row = {c: "" for c in COLUMN_ORDER}
             row.update(id=table_id, type="dataObject",

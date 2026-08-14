@@ -68,10 +68,55 @@ def main() -> int:
     assert from_book.stats["nodes"] == result.stats["nodes"], "в xlsx потерялись строки"
     print("выгрузка в xlsx читается обратно")
 
+    check_subprocesses()
+
     for w in warnings:
         print(f"  предупреждение: {w}")
     print("\nВСЁ ХОРОШО")
     return 0
+
+
+SUBPROCESS_TABLE = """id|name|type|pool|lane|parent_id|next
+s|Заявка|startEvent|ООО|Снабжение||sub
+sub|Проверка поставщика|subProcess|ООО|Снабжение||e
+c_s|Начать|startEvent|ООО||sub|c_t
+c_t|Запросить документы|userTask|ООО||sub|deep
+deep|Экспертиза|subProcess|ООО||sub|c_e
+d_s|Старт|startEvent|ООО||deep|d_t
+d_t|Проверить устав|userTask|ООО||deep|d_e
+d_e|Готово|endEvent|ООО||deep|
+c_e|Проверка завершена|endEvent|ООО||sub|
+e|Закупка проведена|endEvent|ООО|Снабжение||"""
+
+
+def check_subprocesses() -> None:
+    """Вложенное содержимое должно и разбираться, и получать координаты."""
+    result = convert(SUBPROCESS_TABLE.encode("utf-8"))
+    assert result.ok, [str(i) for i in result.issues]
+    xml, _ = apply_layout(result.xml, layout_process)
+    root = ET.fromstring(xml)
+
+    inner = {"startEvent", "endEvent", "userTask", "subProcess"}
+    semantic = {n.get("id") for p in root.findall(f"{B}process") for n in p.iter()
+                if n.tag.split("}")[1] in inner}
+    drawn: set[str] = set()
+    planes = root.findall(f".//{DI}BPMNPlane")
+    for plane in planes:
+        drawn |= {e.get("bpmnElement") for e in plane}
+
+    missing = semantic - drawn
+    assert not missing, f"внутри субпроцессов без координат: {missing}"
+    assert len(planes) == 3, f"ожидалось 3 полотна, получено {len(planes)}"
+    print(f"субпроцессы: {len(semantic)} элементов, полотен {len(planes)}, "
+          f"все с координатами")
+
+    back = to_table(xml)
+    assert convert(back.table.encode("utf-8")).ok, "таблица с субпроцессами не собралась"
+    assert {r["id"] for r in back.rows} == semantic, "при разборе потерялись элементы"
+    nested = {r["id"] for r in back.rows if r["parent_id"]}
+    assert nested == {"c_s", "c_t", "deep", "d_s", "d_t", "d_e", "c_e"}, \
+        f"неверные parent_id: {nested}"
+    print("субпроцессы: разбор обратно сохраняет вложенность")
 
 
 if __name__ == "__main__":

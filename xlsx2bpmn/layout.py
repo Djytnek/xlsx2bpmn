@@ -149,11 +149,19 @@ def _num(value: float) -> str:
     return str(int(round(value)))
 
 
-def _extract(laid_xml: str) -> tuple[list[ET.Element], list[ET.Element]]:
+def _extract(laid_xml: str) -> tuple[list[ET.Element], list[ET.Element],
+                                     list[ET.Element]]:
+    """Фигуры и стрелки основного плана плюс отдельные планы субпроцессов.
+
+    Планы субпроцессов — самостоятельные полотна: их координаты не связаны
+    с основным, поэтому они переносятся как есть.
+    """
     try:
         root = ET.fromstring(laid_xml)
     except ET.ParseError as exc:
         raise LayoutError(f"раскладчик вернул невалидный XML: {exc}") from exc
+
+    diagrams = root.findall(f"{DI}BPMNDiagram")
     plane = root.find(f".//{DI}BPMNPlane")
     if plane is None:
         raise LayoutError("в ответе раскладчика нет BPMNPlane")
@@ -161,7 +169,7 @@ def _extract(laid_xml: str) -> tuple[list[ET.Element], list[ET.Element]]:
     edges = [e for e in plane if e.tag == f"{DI}BPMNEdge"]
     if not shapes:
         raise LayoutError("раскладчик не вернул ни одной фигуры")
-    return shapes, edges
+    return shapes, edges, diagrams[1:]
 
 
 def _bbox(shapes: list[ET.Element], edges: list[ET.Element]) -> Box:
@@ -307,12 +315,14 @@ def merge_layout(xml: str, laid: dict[str, str], meta: dict) -> tuple[str, list[
     order = [p.get("id", "") for p in root.findall(f"{B}process")]
 
     parsed: dict[str, tuple[list[ET.Element], list[ET.Element], Box]] = {}
+    nested: list[ET.Element] = []
     for pid in order:
         if pid not in laid:
             raise LayoutError(f"нет результата раскладки для процесса {pid!r}")
-        shapes, edges = _extract(laid[pid])
+        shapes, edges, extra = _extract(laid[pid])
         _place_data(shapes, edges, meta.get("data", {}).get(pid, {}), warnings)
         parsed[pid] = (shapes, edges, _bbox(shapes, edges))
+        nested += extra
 
     has_pools = bool(meta["participants"])
     inner_x = LABEL_BAND + PAD if has_pools else PAD
@@ -390,6 +400,10 @@ def merge_layout(xml: str, laid: dict[str, str], meta: dict) -> tuple[str, list[
                           {"id": "BPMNPlane_1", "bpmnElement": plane_ref})
     for el in pool_shapes + lane_shapes + all_shapes + all_edges:
         plane.append(el)
+
+    for i, extra in enumerate(nested, start=1):     # полотна субпроцессов
+        extra.set("id", f"BPMNDiagram_sub_{i}")
+        root.append(extra)
 
     ET.indent(root, space="  ")
     return ET.tostring(root, encoding="unicode", xml_declaration=True), warnings
