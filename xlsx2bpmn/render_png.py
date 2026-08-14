@@ -83,6 +83,56 @@ def _arrow(draw, tail, head, size: float, filled: bool) -> None:
     draw.polygon(points, fill=STROKE if filled else PAPER, outline=STROKE)
 
 
+def _icon(draw, x: float, y: float, tag: str, s: float) -> None:
+    """Значок типа задачи в левом верхнем углу, как принято в BPMN."""
+    ax, ay = x + 6 * s, y + 6 * s
+    w = max(int(1.2 * s), 1)
+
+    if tag == "userTask":                              # человечек
+        draw.ellipse([ax + 4 * s, ay + s, ax + 10 * s, ay + 7 * s],
+                     outline=STROKE, width=w)
+        draw.arc([ax + s, ay + 8 * s, ax + 13 * s, ay + 20 * s], 180, 360,
+                 fill=STROKE, width=w)
+        draw.line([(ax + s, ay + 14 * s), (ax + 13 * s, ay + 14 * s)],
+                  fill=STROKE, width=w)
+    elif tag == "serviceTask":                         # шестерёнка
+        cx, cy = ax + 7 * s, ay + 7 * s
+        draw.ellipse([cx - 4.5 * s, cy - 4.5 * s, cx + 4.5 * s, cy + 4.5 * s],
+                     outline=STROKE, width=w)
+        draw.ellipse([cx - 1.6 * s, cy - 1.6 * s, cx + 1.6 * s, cy + 1.6 * s],
+                     outline=STROKE, width=w)
+        for i in range(6):
+            angle = i * math.pi / 3
+            draw.line([(cx + 4.5 * s * math.cos(angle), cy + 4.5 * s * math.sin(angle)),
+                       (cx + 7 * s * math.cos(angle), cy + 7 * s * math.sin(angle))],
+                      fill=STROKE, width=w)
+    elif tag in ("sendTask", "receiveTask"):           # конверт
+        box = [ax, ay + 2 * s, ax + 14 * s, ay + 12 * s]
+        draw.rectangle(box, fill=STROKE if tag == "sendTask" else None,
+                       outline=STROKE, width=w)
+        draw.line([(ax, ay + 2 * s), (ax + 7 * s, ay + 8 * s),
+                   (ax + 14 * s, ay + 2 * s)],
+                  fill=PAPER if tag == "sendTask" else STROKE, width=w)
+    elif tag == "manualTask":                          # кисть руки
+        draw.rounded_rectangle([ax + 2 * s, ay + 5 * s, ax + 14 * s, ay + 13 * s],
+                               radius=2 * s, outline=STROKE, width=w)
+        for offset in (5, 8, 11):
+            draw.line([(ax + offset * s, ay + 5 * s), (ax + offset * s, ay + 2 * s)],
+                      fill=STROKE, width=w)
+    elif tag == "scriptTask":                          # свиток со строками
+        draw.rectangle([ax + 2 * s, ay + s, ax + 12 * s, ay + 13 * s],
+                       outline=STROKE, width=w)
+        for offset in (4, 7, 10):
+            draw.line([(ax + 4 * s, ay + offset * s), (ax + 10 * s, ay + offset * s)],
+                      fill=STROKE, width=w)
+    elif tag == "businessRuleTask":                    # табличка правил
+        draw.rectangle([ax, ay + 2 * s, ax + 14 * s, ay + 13 * s],
+                       outline=STROKE, width=w)
+        draw.line([(ax, ay + 5.5 * s), (ax + 14 * s, ay + 5.5 * s)], fill=STROKE, width=w)
+        draw.line([(ax + 5 * s, ay + 5.5 * s), (ax + 5 * s, ay + 13 * s)],
+                  fill=STROKE, width=w)
+
+
 def _text(draw, lines, cx, cy, font, leading) -> None:
     top = cy - (len(lines) - 1) * leading / 2
     for i, line in enumerate(lines):
@@ -241,6 +291,7 @@ def to_png(xml: str | bytes, scale: float = 2.0) -> bytes:
         else:                                        # задачи и субпроцессы
             draw.rounded_rectangle([left, top, right, bottom], radius=8 * scale,
                                    fill=FILL, outline=STROKE, width=line_w)
+            _icon(draw, left, top, tag, scale)
             marker = meta.get("marker", "")
             shift = 0
             if marker or tag in ("subProcess", "callActivity"):
@@ -269,7 +320,8 @@ def to_png(xml: str | bytes, scale: float = 2.0) -> bytes:
                     draw.line([(cx - 4 * scale, base), (cx + 4 * scale, base)],
                               fill=STROKE, width=max(int(scale), 1))
             if name:
-                _text(draw, _wrap(name, w - 12), cx, cy - shift, font, leading)
+                _text(draw, _wrap(name, w - 14), cx, cy - shift + 6 * scale,
+                      font, leading)
 
     # --- стрелки --------------------------------------------------------------
     for edge in edges:

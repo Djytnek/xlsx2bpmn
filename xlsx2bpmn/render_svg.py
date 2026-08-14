@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import math
 import xml.etree.ElementTree as ET
 
 from .core import ConvertError, EVENT_DEFS, GATEWAY_TYPES, NS
@@ -217,9 +218,50 @@ def _gateway(x: float, y: float, w: float, h: float, info: dict) -> str:
     return "".join(parts)
 
 
+def _task_icon(x: float, y: float, tag: str) -> str:
+    """Значок типа задачи в левом верхнем углу, как принято в BPMN."""
+    ax, ay = x + 6, y + 6                      # левый верхний угол значка
+    thin = f"fill='none' stroke='{STROKE}' stroke-width='1.2'"
+
+    if tag == "userTask":                      # человечек
+        return (f"<circle cx='{_n(ax + 7)}' cy='{_n(ay + 4)}' r='3' {thin}/>"
+                f"<path d='M{_n(ax + 1)},{_n(ay + 14)} a6,6 0 0,1 12,0' {thin}/>"
+                f"<path d='M{_n(ax + 1)},{_n(ay + 14)} h12' {thin}/>")
+    if tag == "serviceTask":                   # шестерёнка
+        ticks = "".join(
+            f"<path d='M{_n(ax + 7 + 4.5 * math.cos(a))},"
+            f"{_n(ay + 7 + 4.5 * math.sin(a))} L"
+            f"{_n(ax + 7 + 7 * math.cos(a))},{_n(ay + 7 + 7 * math.sin(a))}' {thin}/>"
+            for a in (i * math.pi / 3 for i in range(6)))
+        return (f"<circle cx='{_n(ax + 7)}' cy='{_n(ay + 7)}' r='4.5' {thin}/>"
+                f"<circle cx='{_n(ax + 7)}' cy='{_n(ay + 7)}' r='1.6' {thin}/>{ticks}")
+    if tag in ("sendTask", "receiveTask"):     # конверт: у отправки залитый
+        fill = STROKE if tag == "sendTask" else "none"
+        line = PAPER if tag == "sendTask" else STROKE
+        return (f"<rect x='{_n(ax)}' y='{_n(ay + 2)}' width='14' height='10' "
+                f"fill='{fill}' stroke='{STROKE}' stroke-width='1.2'/>"
+                f"<path d='M{_n(ax)},{_n(ay + 2)} L{_n(ax + 7)},{_n(ay + 8)} "
+                f"L{_n(ax + 14)},{_n(ay + 2)}' fill='none' stroke='{line}' "
+                f"stroke-width='1.2'/>")
+    if tag == "manualTask":                    # кисть руки
+        return (f"<path d='M{_n(ax + 2)},{_n(ay + 13)} v-5 a2,2 0 0,1 4,0 v-3 "
+                f"a2,2 0 0,1 4,0 v3 a2,2 0 0,1 4,0 v5 z' {thin}/>")
+    if tag == "scriptTask":                    # свиток со строками
+        return (f"<path d='M{_n(ax + 3)},{_n(ay + 1)} h9 a3,3 0 0,0 -3,4 v6 "
+                f"a3,3 0 0,0 -3,4 h-9 a3,3 0 0,0 3,-4 v-6 a3,3 0 0,0 3,-4 z' {thin}/>"
+                f"<path d='M{_n(ax + 4)},{_n(ay + 5)} h5 M{_n(ax + 3)},{_n(ay + 9)} h5' "
+                f"{thin}/>")
+    if tag == "businessRuleTask":              # табличка правил
+        return (f"<rect x='{_n(ax)}' y='{_n(ay + 2)}' width='14' height='11' {thin}/>"
+                f"<path d='M{_n(ax)},{_n(ay + 5.5)} h14 M{_n(ax + 5)},{_n(ay + 5.5)} "
+                f"v7.5' {thin}/>")
+    return ""
+
+
 def _activity(x: float, y: float, w: float, h: float, info: dict) -> str:
     parts = [f"<rect x='{_n(x)}' y='{_n(y)}' width='{_n(w)}' height='{_n(h)}' "
-             f"rx='8' ry='8' fill='{FILL}' stroke='{STROKE}' stroke-width='1.8'/>"]
+             f"rx='8' ry='8' fill='{FILL}' stroke='{STROKE}' stroke-width='1.8'/>",
+             _task_icon(x, y, info["tag"])]
     cx = x + w / 2
     marker = info.get("marker", "")
     icons = []
@@ -242,7 +284,7 @@ def _activity(x: float, y: float, w: float, h: float, info: dict) -> str:
             f"stroke='{STROKE}' stroke-width='1.4'/>")
     parts += icons
     offset = 8 if icons else 0
-    parts.append(_label(info.get("name", ""), cx, y + h / 2 - offset, w - 12))
+    parts.append(_label(info.get("name", ""), cx, y + h / 2 - offset + 6, w - 14))
     return "".join(parts)
 
 

@@ -172,6 +172,7 @@ def _place(proc: ET.Element) -> tuple[dict, dict, dict, list]:
 
     # --- координаты ----------------------------------------------------------
     boxes: dict[str, tuple[float, float, int, int]] = {}
+    floors: dict[str, float] = {}        # нижняя граница дорожки: обход не глубже
 
     if lane_names:
         # клетка (дорожка, колонка): узлы стопкой, дорожка задаёт полосу по Y
@@ -180,19 +181,31 @@ def _place(proc: ET.Element) -> tuple[dict, dict, dict, list]:
             cell[(lane_of.get(node, 0), layer[node])].append(node)
         _order(cell, columns, len(lane_names), in_edges)
 
+        # обходные стрелки идут понизу своей дорожки — заранее даём им место
+        detours: dict[int, int] = defaultdict(int)
+        for _, src, tgt in flows:
+            if src not in layer or tgt not in layer:
+                continue
+            host = attached.get(src)
+            lane_id = lane_of.get(host or src, 0)
+            if host or layer[tgt] <= layer[src] or layer[tgt] - layer[src] > 1:
+                detours[lane_id] += 1
+
         y_cursor = 0.0
         for index in range(len(lane_names)):
             tallest = max((_stack(cell[(index, col)]) for col in columns),
                           default=0.0)
-            band = max(tallest + 2 * LANE_PAD, LANE_MIN)
+            reserve = detours[index] * DETOUR_GAP + (20 if detours[index] else 0)
+            band = max(tallest + 2 * LANE_PAD + reserve, LANE_MIN)
             for col in sorted(columns):
                 members = cell[(index, col)]
                 if not members:
                     continue
-                y = y_cursor + (band - _stack(members)) / 2
+                y = y_cursor + (band - reserve - _stack(members)) / 2
                 for node in members:
                     w, h = _size(nodes[node])
                     boxes[node] = (col_x[col] + (col_w[col] - w) / 2, y, w, h)
+                    floors[node] = y_cursor + band - 8
                     y += h + ROW_GAP
             y_cursor += band
     else:
@@ -221,12 +234,13 @@ def _place(proc: ET.Element) -> tuple[dict, dict, dict, list]:
         min_y = min(b[1] for b in boxes.values())
         dx, dy = 60 - min_x, 60 - min_y
         boxes = {k: (v[0] + dx, v[1] + dy, v[2], v[3]) for k, v in boxes.items()}
+        floors = {k: v + dy for k, v in floors.items()}
 
-    return nodes, attached, boxes, flows
+    return nodes, attached, boxes, flows, floors
 
 
 def _draw(plane: ET.Element, nodes: dict, attached: dict, boxes: dict,
-          flows: list) -> None:
+          flows: list, floors: dict | None = None) -> None:
     """Переносит посчитанные координаты в BPMNPlane."""
     for node, (x, y, w, h) in boxes.items():
         attrs = {"id": f"{node}_di", "bpmnElement": node}
@@ -244,7 +258,9 @@ def _draw(plane: ET.Element, nodes: dict, attached: dict, boxes: dict,
             continue
         edge = ET.SubElement(plane, f"{DI}BPMNEdge",
                              {"id": f"{fid}_di", "bpmnElement": fid})
-        for x, y in _route(boxes[src], boxes[tgt], src in attached, slots.get(fid, 0)):
+        floor = (floors or {}).get(attached.get(src, src))
+        for x, y in _route(boxes[src], boxes[tgt], src in attached,
+                           slots.get(fid, 0), floor):
             ET.SubElement(edge, f"{D}waypoint", {"x": _n(x), "y": _n(y)})
 
 
@@ -271,7 +287,7 @@ def layout_process(xml: str) -> str:
     # содержимое субпроцессов: каждому своё полотно, чтобы редактор показал
     # его при раскрытии
     for index, sub in enumerate(proc.iter(f"{B}subProcess"), start=1):
-        nodes, attached, boxes, flows = _place(sub)
+        nodes, attached, boxes, flows, floors = _place(sub)
         if not boxes:
             continue
         sub_diagram = ET.SubElement(root, f"{DI}BPMNDiagram",
@@ -279,7 +295,7 @@ def layout_process(xml: str) -> str:
         sub_plane = ET.SubElement(sub_diagram, f"{DI}BPMNPlane", {
             "id": f"BPMNPlane_sub_{index}", "bpmnElement": sub.get("id", ""),
         })
-        _draw(sub_plane, nodes, attached, boxes, flows)
+        _draw(sub_plane, nodes, attached, boxes, flows, floors)
 
     ET.indent(root, space="  ")
     return ET.tostring(root, encoding="unicode", xml_declaration=True)
@@ -287,6 +303,11 @@ def layout_process(xml: str) -> str:
 
 def _n(value: float) -> str:
     return str(int(round(value)))
+
+
+def _floor(drop: float, floor: float | None) -> float:
+    """Не пускаем обход ниже полосы своей дорожки."""
+    return min(drop, floor) if floor is not None else drop
 
 
 def _detour(src: tuple[float, float, int, int], tgt: tuple[float, float, int, int],
@@ -332,7 +353,8 @@ def _slots(boxes: dict, flows: list, attached: dict) -> dict[str, int]:
 
 
 def _route(src: tuple[float, float, int, int], tgt: tuple[float, float, int, int],
-           from_boundary: bool, slot: int = 0) -> list[tuple[float, float]]:
+           from_boundary: bool, slot: int = 0,
+           floor: float | None = None) -> list[tuple[float, float]]:
     sx, sy, sw, sh = src
     tx, ty, tw, th = tgt
     s_cx, s_cy = sx + sw / 2, sy + sh / 2
@@ -341,7 +363,7 @@ def _route(src: tuple[float, float, int, int], tgt: tuple[float, float, int, int
     lane = slot * DETOUR_GAP
 
     if from_boundary:                                   # из граничного события — вниз
-        drop = max(sy + sh, ty + th) + 40 + lane
+        drop = _floor(max(sy + sh, ty + th) + 40 + lane, floor)
         return [(s_cx, sy + sh), (s_cx, drop), (t_cx, drop), (t_cx, ty + th)]
 
     if tx > sx + sw:                                    # вперёд
@@ -349,14 +371,14 @@ def _route(src: tuple[float, float, int, int], tgt: tuple[float, float, int, int
             if tx - (sx + sw) > COL_GAP * 1.6:
                 # перепрыгивает через колонку: между ними стоят другие узлы,
                 # поэтому обходим понизу, а не режем их насквозь
-                drop = max(sy + sh, ty + th) + 20 + lane
+                drop = _floor(max(sy + sh, ty + th) + 20 + lane, floor)
                 return [(s_cx, sy + sh), (s_cx, drop), (t_cx, drop), (t_cx, ty + th)]
             return [(sx + sw, s_cy), (tx, t_cy)]
         mid = (sx + sw + tx) / 2
         return [(sx + sw, s_cy), (mid, s_cy), (mid, t_cy), (tx, t_cy)]
 
     if tx + tw < sx:                                    # назад — обходим снизу
-        drop = max(sy + sh, ty + th) + 50 + lane
+        drop = _floor(max(sy + sh, ty + th) + 50 + lane, floor)
         return [(s_cx, sy + sh), (s_cx, drop), (t_cx, drop), (t_cx, ty + th)]
 
     if t_cy > s_cy:                                     # вниз в той же колонке
