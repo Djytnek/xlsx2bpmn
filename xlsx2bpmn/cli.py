@@ -29,6 +29,7 @@ from .to_table import to_table, to_workbook
 TEMPLATE = Path(__file__).parent / "template.xlsx"
 
 BPMN_HEAD = re.compile(rb"<\s*(\w+:)?definitions", re.I)
+PICTURES = {".png", ".svg"}
 
 
 def _looks_like_bpmn(data: bytes) -> bool:
@@ -64,6 +65,7 @@ def _table_one(path: Path, out: Path, args) -> int:
               f"превращает xlsx2bpmn", file=sys.stderr)
         return 2
 
+    picture_only = out.suffix.lower() in PICTURES
     try:
         result = to_table(data, full=out.suffix.lower() == ".xlsx")
     except ConvertError as exc:
@@ -77,14 +79,19 @@ def _table_one(path: Path, out: Path, args) -> int:
     if args.report:
         Path(args.report).write_text("\n".join(lines), encoding="utf-8")
 
-    try:
-        if out.suffix.lower() == ".xlsx":
-            out.write_bytes(to_workbook(result, TEMPLATE.read_bytes()))
-        else:
-            out.write_text(result.table + "\n", encoding="utf-8")
-    except OSError as exc:
-        print(f"{path.name}: ERROR не удалось записать {out}: {exc}", file=sys.stderr)
-        return 2
+    if picture_only:
+        args.png = out.suffix.lower() == ".png"
+        args.svg = out.suffix.lower() == ".svg"
+    else:
+        try:
+            if out.suffix.lower() == ".xlsx":
+                out.write_bytes(to_workbook(result, TEMPLATE.read_bytes()))
+            else:
+                out.write_text(result.table + "\n", encoding="utf-8")
+        except OSError as exc:
+            print(f"{path.name}: ERROR не удалось записать {out}: {exc}",
+                  file=sys.stderr)
+            return 2
 
     # у присланной диаграммы координат может не быть — тогда рисуем по своей
     source = data.decode("utf-8-sig", "replace")
@@ -96,9 +103,12 @@ def _table_one(path: Path, out: Path, args) -> int:
             except LayoutError:
                 pass
     picture = _draw(source, out, args)
+    if picture_only and not picture:
+        return 3
     if not args.quiet:
         s = result.stats
-        print(f"OK -> {out}{picture}  элементов {s['nodes']}, потоков {s['flows']}, "
+        where = picture[3:] if picture_only else f"{out}{picture}"
+        print(f"OK -> {where}  элементов {s['nodes']}, потоков {s['flows']}, "
               f"сообщений {s['message_flows']}, пулов {s['pools']}, "
               f"колонок {s['columns']}, потерь {s['warnings']}")
     return 0
@@ -146,6 +156,18 @@ def _convert_one(path: Path, out: Path, args) -> int:
             print(f"{path.name}: {line}", file=sys.stderr)
     if args.report:
         Path(args.report).write_text("\n".join(lines), encoding="utf-8")
+
+    if out.suffix.lower() in PICTURES:          # попросили только картинку
+        args.png = out.suffix.lower() == ".png"
+        args.svg = out.suffix.lower() == ".svg"
+        made = _draw(xml, out, args)
+        if not made:
+            return 3
+        if not args.quiet:
+            s = result.stats
+            print(f"OK -> {made[3:]}  элементов {s['nodes']}, потоков {s['flows']}, "
+                  f"сообщений {s['message_flows']}, пулов {s['pools']}")
+        return 0
 
     out.write_text(xml, encoding="utf-8")
     picture = _draw(xml, out, args)

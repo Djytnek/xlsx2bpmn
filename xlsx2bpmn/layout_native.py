@@ -86,24 +86,36 @@ def _place(proc: ET.Element) -> tuple[dict, dict, dict, list]:
                     lane_of[nid] = index
 
     # --- слои: длиннейший путь от источников, с защитой от циклов -----------
+    # Граничные события сами не занимают колонку, но слои через них проходят:
+    # иначе задача, запускаемая только по таймеру, уезжает в самое начало.
     layout_nodes = [n for n in nodes if n not in attached]
-    layer: dict[str, int] = {n: 0 for n in layout_nodes}
-    sources = [n for n in layout_nodes if in_count[n] == 0] or layout_nodes[:1]
+    layer: dict[str, int] = {n: 0 for n in nodes}
+
+    steps: dict[str, list[tuple[str, int]]] = defaultdict(list)
+    reach: dict[str, int] = defaultdict(int)
+    for src, targets in out_edges.items():
+        for tgt in targets:
+            steps[src].append((tgt, 1))
+            reach[tgt] += 1
+    for boundary, host in attached.items():      # событие живёт в слое хозяина
+        if host in nodes:
+            steps[host].append((boundary, 0))
+            reach[boundary] += 1
+
+    sources = [n for n in nodes if not reach[n]] or layout_nodes[:1]
 
     queue = deque(sources)
     seen_order: list[str] = []
     guard = 0
-    limit = len(layout_nodes) * len(layout_nodes) + 100
+    limit = len(nodes) * len(nodes) + 100
     while queue and guard < limit:
         guard += 1
         node = queue.popleft()
-        if node not in seen_order:
+        if node not in seen_order and node not in attached:
             seen_order.append(node)
-        for nxt in out_edges.get(node, []):
-            if nxt in attached:
-                continue
-            if layer[nxt] < layer[node] + 1:
-                layer[nxt] = layer[node] + 1
+        for nxt, weight in steps.get(node, []):
+            if layer[nxt] < layer[node] + weight:
+                layer[nxt] = layer[node] + weight
                 queue.append(nxt)
 
     for node in layout_nodes:                    # недостижимые — в свою колонку
@@ -266,6 +278,11 @@ def _route(src: tuple[float, float, int, int], tgt: tuple[float, float, int, int
 
     if tx > sx + sw:                                    # вперёд
         if abs(s_cy - t_cy) < 1:
+            if tx - (sx + sw) > COL_GAP * 1.6:
+                # перепрыгивает через колонку: между ними стоят другие узлы,
+                # поэтому обходим понизу, а не режем их насквозь
+                drop = max(sy + sh, ty + th) + 20
+                return [(s_cx, sy + sh), (s_cx, drop), (t_cx, drop), (t_cx, ty + th)]
             return [(sx + sw, s_cy), (tx, t_cy)]
         mid = (sx + sw + tx) / 2
         return [(sx + sw, s_cy), (mid, s_cy), (mid, t_cy), (tx, t_cy)]
