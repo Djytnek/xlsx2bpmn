@@ -458,6 +458,15 @@ def node_layout(script: Path):
     return run
 
 
+def layout_name(choice: str = "auto") -> str:
+    """Какой раскладчик будет использован — чтобы писать это в вывод."""
+    if choice == "native":
+        return "встроенный"
+    if node_script() is not None:
+        return "bpmn-auto-layout"
+    return "недоступен" if choice == "node" else "встроенный"
+
+
 def pick_layout(choice: str = "auto"):
     """Раскладчик по имени.
 

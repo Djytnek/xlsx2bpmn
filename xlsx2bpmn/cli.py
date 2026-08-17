@@ -20,7 +20,7 @@ from pathlib import Path
 
 from . import __version__
 from .core import ConvertError, convert
-from .layout import LayoutError, apply_layout, pick_layout
+from .layout import LayoutError, apply_layout, layout_name, pick_layout
 from .layout_native import layout_process
 from .render_png import to_png
 from .render_svg import planes, to_svg
@@ -173,15 +173,18 @@ def _convert_one(path: Path, out: Path, args) -> int:
         if not args.quiet:
             s = result.stats
             print(f"OK -> {made[3:]}  элементов {s['nodes']}, потоков {s['flows']}, "
-                  f"сообщений {s['message_flows']}, пулов {s['pools']}")
+                  f"сообщений {s['message_flows']}, пулов {s['pools']}, "
+                  f"раскладка: {layout_name(args.layout)}")
         return 0
 
     out.write_text(xml, encoding="utf-8")
     picture = _draw(xml, out, args)
     if not args.quiet:
         s = result.stats
+        engine = "нет" if args.no_layout else layout_name(args.layout)
         print(f"OK -> {out}{picture}  элементов {s['nodes']}, потоков {s['flows']}, "
-              f"сообщений {s['message_flows']}, пулов {s['pools']}")
+              f"сообщений {s['message_flows']}, пулов {s['pools']}, "
+              f"раскладка: {engine}")
     return 0
 
 
