@@ -311,9 +311,13 @@ def _link(all_rows: list[dict[str, str]], next_by_src: dict[str, list[tuple[str,
 # Точка входа
 # --------------------------------------------------------------------------- #
 
-def to_table(xml: str | bytes, *, full: bool = False,
-             sep: str = "|") -> TableResult:
-    """Разбирает BPMN в таблицу. Ничего не читает и не пишет на диск."""
+def to_table(xml: str | bytes, *, full: bool = False, sep: str = "|",
+             level: str | None = None) -> TableResult:
+    """Разбирает BPMN в таблицу. Ничего не читает и не пишет на диск.
+
+    level — id субпроцесса: тогда в таблицу попадёт только его содержимое.
+    Пустая строка означает верхний уровень, без вложенного.
+    """
     issues: list[Issue] = []
     root = _parse(xml)
 
@@ -384,6 +388,17 @@ def to_table(xml: str | bytes, *, full: bool = False,
 
     _link(all_rows, next_by_src, msg_flows, issues)
 
+    if level is not None:
+        known = {r["id"] for r in all_rows}
+        if level and level not in known:
+            raise ConvertError(
+                f"уровень {level!r} в схеме не найден. Субпроцессы: "
+                + (", ".join(sorted(r["id"] for r in all_rows
+                                    if r["type"] in SUBPROCESS_TYPES)) or "нет"))
+        all_rows = [r for r in all_rows if r["parent_id"] == level]
+        if not all_rows:
+            raise ConvertError(f"внутри {level!r} нет ни одного элемента")
+
     # --- какие колонки выводить -------------------------------------------
     if full:
         columns = list(COLUMN_ORDER)
@@ -406,22 +421,56 @@ def to_table(xml: str | bytes, *, full: bool = False,
                        stats=stats, rows=all_rows, columns=columns)
 
 
-def to_workbook(result: TableResult, template: bytes) -> bytes:
+SHEET_BAD = set(r':\\/?*[]')
+SHEET_MAX = 31                              # ограничение самого Excel
+
+
+def sheet_name(subprocess_id: str) -> str | None:
+    """Имя листа для субпроцесса или None, если id для листа не годится."""
+    if not subprocess_id or len(subprocess_id) > SHEET_MAX:
+        return None
+    if set(subprocess_id) & SHEET_BAD:
+        return None
+    return subprocess_id
+
+
+def to_workbook(result: TableResult, template: bytes, *,
+                split: bool = True) -> bytes:
     """Раскладывает строки по вложенному шаблону. Возвращает байты .xlsx.
 
     Шаблон нужен ради выпадающих списков и листа «Справка»: заполненная
     таблица остаётся редактируемой ровно так же, как пустая.
+
+    При split=True содержимое каждого субпроцесса уезжает на отдельный лист,
+    названный его id, а колонка parent_id там очищается — она подразумевается
+    именем листа. Так книга читается обратно без единой правки.
     """
     import io
 
     from openpyxl import load_workbook
+
+    inside: dict[str, list[dict]] = {}
+    if split:
+        for row in result.rows:
+            parent = row["parent_id"]
+            if parent and sheet_name(parent):
+                inside.setdefault(parent, []).append(row)
 
     wb = load_workbook(io.BytesIO(template))
     ws = wb["Process"]
     if ws.max_row > 1:                      # выкинуть строки-примеры вместе с их заливкой
         ws.delete_rows(2, ws.max_row - 1)
     for row in result.rows:
+        if row["parent_id"] in inside:
+            continue                        # уедет на свой лист
         ws.append([row[column] or None for column in COLUMN_ORDER])
+
+    for parent, rows in inside.items():
+        page = wb.create_sheet(sheet_name(parent))
+        page.append(COLUMN_ORDER)
+        for row in rows:
+            page.append([("" if column == "parent_id" else row[column]) or None
+                         for column in COLUMN_ORDER])
 
     buffer = io.BytesIO()
     wb.save(buffer)

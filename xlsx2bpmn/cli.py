@@ -23,7 +23,7 @@ from .core import ConvertError, convert
 from .layout import LayoutError, apply_layout, layout_name, pick_layout
 from .layout_native import layout_process
 from .render_png import to_png
-from .render_svg import planes, to_svg
+from .render_svg import to_svg
 from .to_table import to_table, to_workbook
 
 TEMPLATE = Path(__file__).parent / "template.xlsx"
@@ -39,11 +39,6 @@ def _looks_like_bpmn(data: bytes) -> bool:
 def _draw(xml: str, out: Path, args) -> str:
     """Рисует картинки рядом с результатом по ключам --svg и --png."""
     level = getattr(args, "level", None)
-    if level == "?":
-        print("Уровни в схеме:", file=sys.stderr)
-        for ref, name in planes(xml):
-            print(f"  {ref:20} {name}", file=sys.stderr)
-        return ""
     made = []
     for wanted, suffix, render in (
             (args.svg, ".svg", lambda: to_svg(xml, level=level).encode("utf-8")),
@@ -60,6 +55,44 @@ def _draw(xml: str, out: Path, args) -> str:
     return (" + " + " + ".join(made)) if made else ""
 
 
+def _levels(path: Path, args) -> int:
+    """Печатает уровни схемы: сам процесс и каждый субпроцесс."""
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        print(f"{path.name}: ERROR {exc}", file=sys.stderr)
+        return 2
+
+    if _looks_like_bpmn(data):
+        xml = data.decode("utf-8-sig", "replace")
+        if "BPMNPlane" not in xml:
+            rebuilt = convert(to_table(data).table.encode("utf-8"))
+            xml, _ = apply_layout(rebuilt.xml, pick_layout(args.layout))
+    else:
+        result = convert(data, sheet=args.sheet)
+        if not result.ok:
+            for issue in result.errors:
+                print(f"{path.name}: {issue}", file=sys.stderr)
+            return 1
+        xml, _ = apply_layout(result.xml, pick_layout(args.layout))
+
+    rows = to_table(xml).rows
+    inside: dict[str, int] = {}
+    for row in rows:
+        inside[row["parent_id"]] = inside.get(row["parent_id"], 0) + 1
+    names = {row["id"]: row["name"] or row["id"] for row in rows}
+
+    print(f"{'уровень':<22}{'название':<34}элементов")
+    print(f"{'(весь процесс)':<22}{'':<34}{inside.get('', 0)}")
+    for row in rows:
+        if row["type"] in ("subProcess", "callActivity"):
+            print(f"{row['id']:<22}{names[row['id']][:32]:<34}"
+                  f"{inside.get(row['id'], 0)}")
+    print()
+    print("Взять один уровень:  --level ID")
+    return 0
+
+
 def _table_one(path: Path, out: Path, args) -> int:
     """Обратный ход: диаграмма -> таблица."""
     try:
@@ -74,7 +107,8 @@ def _table_one(path: Path, out: Path, args) -> int:
 
     picture_only = out.suffix.lower() in PICTURES
     try:
-        result = to_table(data, full=out.suffix.lower() == ".xlsx")
+        result = to_table(data, full=out.suffix.lower() == ".xlsx",
+                          level=args.level)
     except ConvertError as exc:
         print(f"{path.name}: ERROR {exc}", file=sys.stderr)
         return 2
@@ -92,7 +126,8 @@ def _table_one(path: Path, out: Path, args) -> int:
     else:
         try:
             if out.suffix.lower() == ".xlsx":
-                out.write_bytes(to_workbook(result, TEMPLATE.read_bytes()))
+                out.write_bytes(to_workbook(result, TEMPLATE.read_bytes(),
+                                            split=args.level is None))
             else:
                 out.write_text(result.table + "\n", encoding="utf-8")
         except OSError as exc:
@@ -209,8 +244,10 @@ def main() -> int:
     ap.add_argument("--svg", action="store_true",
                     help="дополнительно нарисовать картинку .svg рядом с результатом")
     ap.add_argument("--level", metavar="ID",
-                    help="рисовать не весь процесс, а содержимое субпроцесса "
-                         "с этим id; --level ? покажет список уровней")
+                    help="работать не со всем процессом, а с содержимым "
+                         "субпроцесса: и картинка, и таблица будут только его")
+    ap.add_argument("--levels", action="store_true",
+                    help="показать уровни схемы и выйти")
     ap.add_argument("--png", action="store_true",
                     help="то же, но растром .png")
     ap.add_argument("--template", metavar="PATH",
@@ -238,6 +275,11 @@ def main() -> int:
         shutil.copyfile(TEMPLATE, dest)
         print(f"Шаблон создан: {dest}")
         return 0
+
+    if args.levels:
+        if not args.input:
+            ap.error("укажите файл, уровни которого показать")
+        return _levels(Path(args.input[0]), args)
 
     if args.to_table:
         reverse = True

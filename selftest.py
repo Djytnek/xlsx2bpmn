@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """Проверка на встроенном шаблоне. Запуск: python selftest.py"""
+import io
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -117,6 +118,24 @@ def check_subprocesses() -> None:
     assert nested == {"c_s", "c_t", "deep", "d_s", "d_t", "d_e", "c_e"}, \
         f"неверные parent_id: {nested}"
     print("субпроцессы: разбор обратно сохраняет вложенность")
+
+    # один уровень достаётся отдельно
+    only = to_table(xml, level="deep")
+    assert {r["id"] for r in only.rows} == {"d_s", "d_t", "d_e"}, \
+        f"уровень 'deep' достался неверно: {[r['id'] for r in only.rows]}"
+    print("субпроцессы: уровень достаётся отдельной таблицей")
+
+    # книга раскладывается по листам и читается обратно без правок
+    book = to_workbook(to_table(xml, full=True), TEMPLATE.read_bytes())
+    from openpyxl import load_workbook
+
+    names = load_workbook(io.BytesIO(book)).sheetnames
+    assert {"sub", "deep"} <= set(names), f"нет листов субпроцессов: {names}"
+    again = convert(book)
+    assert again.ok, [str(i) for i in again.issues]
+    twice, _ = apply_layout(again.xml, layout_process)
+    assert to_table(twice).table == back.table, "книга с листами исказила схему"
+    print(f"субпроцессы: книга разложена по листам {names} и читается обратно")
 
 
 if __name__ == "__main__":
