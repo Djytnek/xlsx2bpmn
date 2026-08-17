@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .core import (EVENT_DEFS, NODE_TYPES, NS, SUBPROCESS_TYPES,
-                   ConvertError, Issue)
+                   ConvertError, Issue, parse_next)
 
 B = f"{{{NS['bpmn']}}}"
 
@@ -307,6 +307,51 @@ def _link(all_rows: list[dict[str, str]], next_by_src: dict[str, list[tuple[str,
                 row[column] = ""
 
 
+def _one_level(all_rows: list[dict[str, str]], level: str,
+               issues: list[Issue]) -> list[dict[str, str]]:
+    """Оставляет содержимое одного уровня — так, чтобы оно собиралось само по себе.
+
+    Уровень становится самостоятельным процессом: parent_id очищается,
+    документы уровня едут с ним, а ссылки наружу убираются — иначе такую
+    таблицу нельзя превратить обратно в диаграмму.
+    """
+    known = {r["id"] for r in all_rows}
+    if level and level not in known:
+        raise ConvertError(
+            f"уровень {level!r} в схеме не найден. Субпроцессы: "
+            + (", ".join(sorted(r["id"] for r in all_rows
+                                if r["type"] in SUBPROCESS_TYPES)) or "нет"))
+
+    kept = [r for r in all_rows
+            if r["type"] != "dataObject" and r["parent_id"] == level]
+    if not kept:
+        raise ConvertError(f"внутри {level!r} нет ни одного элемента")
+
+    where = f"уровень {level!r}" if level else "верхний уровень"
+    alive = {r["id"] for r in kept}
+    used: set[str] = set()
+    for row in kept:
+        row["parent_id"] = ""
+        for column, refs in (("next", [s["target"] for s in parse_next(row["next"])]),
+                             ("message_to", row["message_to"].split(";"))):
+            outside = [r for r in refs if r and r not in alive]
+            if not outside:
+                continue
+            issues.append(Issue("warning", None,
+                                f"{where}: {column} у {row['id']!r} ведёт наружу "
+                                f"({', '.join(outside)}); вне своего уровня связь "
+                                f"не существует, убрана"))
+        row["next"] = "; ".join(s["raw"] for s in parse_next(row["next"])
+                                if s["target"] in alive)
+        row["message_to"] = ";".join(t for t in row["message_to"].split(";")
+                                     if t and t in alive)
+        used |= {d for c in ("data_in", "data_out")
+                 for d in row[c].split(";") if d}
+
+    return kept + [r for r in all_rows
+                   if r["type"] == "dataObject" and r["id"] in used]
+
+
 # --------------------------------------------------------------------------- #
 # Точка входа
 # --------------------------------------------------------------------------- #
@@ -389,15 +434,7 @@ def to_table(xml: str | bytes, *, full: bool = False, sep: str = "|",
     _link(all_rows, next_by_src, msg_flows, issues)
 
     if level is not None:
-        known = {r["id"] for r in all_rows}
-        if level and level not in known:
-            raise ConvertError(
-                f"уровень {level!r} в схеме не найден. Субпроцессы: "
-                + (", ".join(sorted(r["id"] for r in all_rows
-                                    if r["type"] in SUBPROCESS_TYPES)) or "нет"))
-        all_rows = [r for r in all_rows if r["parent_id"] == level]
-        if not all_rows:
-            raise ConvertError(f"внутри {level!r} нет ни одного элемента")
+        all_rows = _one_level(all_rows, level, issues)
 
     # --- какие колонки выводить -------------------------------------------
     if full:

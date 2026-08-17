@@ -125,6 +125,8 @@ def check_subprocesses() -> None:
         f"уровень 'deep' достался неверно: {[r['id'] for r in only.rows]}"
     print("субпроцессы: уровень достаётся отдельной таблицей")
 
+    check_levels()
+
     # книга раскладывается по листам и читается обратно без правок
     book = to_workbook(to_table(xml, full=True), TEMPLATE.read_bytes())
     from openpyxl import load_workbook
@@ -136,6 +138,44 @@ def check_subprocesses() -> None:
     twice, _ = apply_layout(again.xml, layout_process)
     assert to_table(twice).table == back.table, "книга с листами исказила схему"
     print(f"субпроцессы: книга разложена по листам {names} и читается обратно")
+
+
+LEVELS_TABLE = """id|name|type|pool|lane|parent_id|next|data_in|data_out
+s|Заявка|startEvent|ООО|Снабжение||t1||
+t1|Оформить|userTask|ООО|Снабжение||sub||zayavka
+sub|Проверка|subProcess|ООО|Юрист||t2||
+t2|Закупить|userTask|ООО|Снабжение||e|zayavka|
+e|Готово|endEvent|ООО|Снабжение||||
+c_s|Начали|startEvent|ООО||sub|c_t||
+c_t|Запросить устав|userTask|ООО||sub|c_e||ustav
+c_e|Проверено|endEvent|ООО||sub|||
+zayavka|Заявка|dataObject|ООО|||||
+ustav|Устав|dataObject|ООО|||||"""
+
+
+def check_levels() -> None:
+    """Каждый уровень должен собираться сам по себе — на этом стоит --all-levels."""
+    result = convert(LEVELS_TABLE.encode("utf-8"))
+    assert result.ok, [str(i) for i in result.issues]
+    xml, _ = apply_layout(result.xml, layout_process)
+
+    parts = {}
+    for level in ("", "sub"):
+        part = to_table(xml, full=True, level=level)
+        again = convert(part.table.encode("utf-8"))
+        assert again.ok, [str(i) for i in again.issues]
+        assert not again.warnings, \
+            f"уровень {level!r} собрался с предупреждениями: " \
+            f"{[str(i) for i in again.warnings]}"
+        assert all(not r["parent_id"] for r in part.rows), \
+            f"уровень {level!r}: остался parent_id на чужого родителя"
+        parts[level] = {r["id"] for r in part.rows}
+
+    # документ едет с тем уровнем, где им пользуются, и только с ним
+    assert parts[""] == {"s", "t1", "sub", "t2", "e", "zayavka"}, parts[""]
+    assert parts["sub"] == {"c_s", "c_t", "c_e", "ustav"}, parts["sub"]
+    print(f"уровни: каждый собирается сам по себе, документы уехали по своим "
+          f"({len(parts[''])} + {len(parts['sub'])})")
 
 
 if __name__ == "__main__":

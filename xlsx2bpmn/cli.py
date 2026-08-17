@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .core import ConvertError, convert
+from .core import SUBPROCESS_TYPES, ConvertError, convert
 from .layout import LayoutError, apply_layout, layout_name, pick_layout
 from .layout_native import layout_process
 from .render_png import to_png
@@ -30,6 +30,7 @@ TEMPLATE = Path(__file__).parent / "template.xlsx"
 
 BPMN_HEAD = re.compile(rb"<\s*(\w+:)?definitions", re.I)
 PICTURES = {".png", ".svg"}
+NAME_BAD = re.compile(r'[\\/:*?"<>|]+')
 
 
 def _looks_like_bpmn(data: bytes) -> bool:
@@ -55,26 +56,118 @@ def _draw(xml: str, out: Path, args) -> str:
     return (" + " + " + ".join(made)) if made else ""
 
 
-def _levels(path: Path, args) -> int:
-    """Печатает уровни схемы: сам процесс и каждый субпроцесс."""
+def _diagram(path: Path, args) -> str:
+    """Разложенная диаграмма, что бы ни дали на вход — таблицу или .bpmn."""
+    data = path.read_bytes()
+    if _looks_like_bpmn(data):
+        xml = data.decode("utf-8-sig", "replace")
+        if "BPMNPlane" in xml:
+            return xml
+        result = convert(to_table(data).table.encode("utf-8"))
+    else:
+        result = convert(data, sheet=args.sheet, strict=args.strict,
+                         executable=args.executable, target=args.target)
+    if not result.ok:
+        raise ConvertError("\n".join(str(i) for i in result.errors))
+    xml, _ = apply_layout(result.xml, pick_layout(args.layout))
+    return xml
+
+
+def _sublevels(rows: list[dict]) -> list[str]:
+    """id субпроцессов с содержимым, в порядке появления в таблице.
+
+    Пустой субпроцесс и callActivity уровнем не считаются: внутри них нечего
+    показывать — вызываемый процесс живёт в своём файле.
+    """
+    filled = {r["parent_id"] for r in rows if r["parent_id"]}
+    return [r["id"] for r in rows
+            if r["type"] in SUBPROCESS_TYPES and r["id"] in filled]
+
+
+def _folder_name(text: str, fallback: str) -> str:
+    """Имя файла из названия уровня: без запрещённых знаков и без пробелов."""
+    name = "-".join(NAME_BAD.sub("-", text).split()).strip("-. ")
+    return name[:60] or fallback
+
+
+def _bundle(path: Path, out: Path, args) -> int:
+    """Раскладывает каждый уровень процесса тремя файлами в одну папку."""
     try:
-        data = path.read_bytes()
-    except OSError as exc:
+        master = _diagram(path, args)
+    except (ConvertError, LayoutError, OSError) as exc:
         print(f"{path.name}: ERROR {exc}", file=sys.stderr)
         return 2
 
-    if _looks_like_bpmn(data):
-        xml = data.decode("utf-8-sig", "replace")
-        if "BPMNPlane" not in xml:
-            rebuilt = convert(to_table(data).table.encode("utf-8"))
-            xml, _ = apply_layout(rebuilt.xml, pick_layout(args.layout))
-    else:
-        result = convert(data, sheet=args.sheet)
-        if not result.ok:
-            for issue in result.errors:
-                print(f"{path.name}: {issue}", file=sys.stderr)
-            return 1
-        xml, _ = apply_layout(result.xml, pick_layout(args.layout))
+    rows = to_table(master).rows
+    names = {r["id"]: r["name"] or r["id"] for r in rows}
+    levels = [("", out.name)] + [(i, names[i]) for i in _sublevels(rows)]
+
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"ERROR не удалось создать папку {out}: {exc}", file=sys.stderr)
+        return 2
+
+    template = TEMPLATE.read_bytes()
+    if not args.quiet:
+        print(f"Папка: {out}")
+    made, worst = 0, 0
+    for number, (level, title) in enumerate(levels, start=1):
+        stem = f"{number:02d}-{_folder_name(title, level or 'process')}"
+        # верхний уровень отдаём целиком: и вложенное содержимое, и все полотна
+        try:
+            table = to_table(master, full=True, level=None if not level else level)
+            xml = master
+            if level:
+                rebuilt = convert(table.table.encode("utf-8"))
+                if not rebuilt.ok:
+                    raise ConvertError("\n".join(str(i) for i in rebuilt.errors))
+                xml, _ = apply_layout(rebuilt.xml, pick_layout(args.layout))
+            book = to_workbook(table, template, split=not level)
+        except (ConvertError, LayoutError) as exc:
+            print(f"  {stem}: ERROR {exc}", file=sys.stderr)
+            worst = max(worst, 1)
+            continue
+
+        wrote = []
+        try:
+            for suffix, blob in ((".xlsx", book), (".bpmn", xml.encode("utf-8"))):
+                (out / (stem + suffix)).write_bytes(blob)
+                wrote.append(suffix)
+        except OSError as exc:
+            print(f"  {stem}: ERROR не удалось записать: {exc}", file=sys.stderr)
+            worst = max(worst, 2)
+            continue
+        # xml здесь — уже отдельная схема этого уровня, целиться в полотно не надо
+        for suffix, render in ((".png", lambda: to_png(xml)),
+                               (".svg", lambda: to_svg(xml).encode("utf-8"))):
+            if suffix == ".svg" and not args.svg:
+                continue
+            try:
+                (out / (stem + suffix)).write_bytes(render())
+                wrote.append(suffix)
+            except (ConvertError, OSError) as exc:
+                print(f"  {stem}{suffix} не нарисован: {exc}", file=sys.stderr)
+                worst = max(worst, 3)
+
+        made += len(wrote)
+        if not args.quiet:
+            what = "весь процесс" if not level else level
+            print(f"  {stem}{' + '.join(wrote)}   {what}, "
+                  f"элементов {len(table.rows)}")
+
+    if not args.quiet:
+        print(f"Готово: уровней {len(levels)}, файлов {made}")
+    return worst
+
+
+def _levels(path: Path, args) -> int:
+    """Печатает уровни схемы: сам процесс и каждый субпроцесс."""
+    try:
+        xml = _diagram(path, args)
+    except (ConvertError, LayoutError, OSError) as exc:
+        print(f"{path.name}: ERROR {exc}", file=sys.stderr)
+        return 2
 
     rows = to_table(xml).rows
     inside: dict[str, int] = {}
@@ -248,6 +341,10 @@ def main() -> int:
                          "субпроцесса: и картинка, и таблица будут только его")
     ap.add_argument("--levels", action="store_true",
                     help="показать уровни схемы и выйти")
+    ap.add_argument("--all-levels", action="store_true",
+                    help="сложить в папку все уровни сразу: каждому — таблица, "
+                         ".bpmn и картинка. Имя папки берётся от файла, "
+                         "перекрывается ключом -o")
     ap.add_argument("--png", action="store_true",
                     help="то же, но растром .png")
     ap.add_argument("--template", metavar="PATH",
@@ -280,6 +377,18 @@ def main() -> int:
         if not args.input:
             ap.error("укажите файл, уровни которого показать")
         return _levels(Path(args.input[0]), args)
+
+    if args.all_levels:
+        if not args.input:
+            ap.error("укажите файл, уровни которого разложить по папке")
+        if args.output and len(args.input) > 1:
+            ap.error("-o работает только с одним файлом")
+        worst = 0
+        for name in args.input:
+            path = Path(name)
+            folder = Path(args.output) if args.output else path.with_suffix("")
+            worst = max(worst, _bundle(path, folder, args))
+        return worst
 
     if args.to_table:
         reverse = True
