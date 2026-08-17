@@ -291,31 +291,77 @@ def _sheet_rows(data: bytes, sheet: str | None, issues: list[Issue]):
     except Exception as exc:                       # noqa: BLE001
         raise ConvertError(f"Не удалось прочитать xlsx: {exc}") from exc
     try:
-        if sheet and sheet in wb.sheetnames:
-            ws = wb[sheet]
-        elif "Process" in wb.sheetnames:
-            ws = wb["Process"]
-        else:
-            ws = wb[wb.sheetnames[0]]
+        tables: list[tuple[str, list]] = []
+        for name in wb.sheetnames:
+            rows = list(wb[name].iter_rows(values_only=True))
+            if rows and _is_table(rows[0]):
+                tables.append((name, rows))
+        if not tables:
+            raise ConvertError(
+                "Ни на одном листе нет таблицы процесса: нужны колонки "
+                + ", ".join(sorted(REQUIRED_COLUMNS)))
+
+        # первым идёт главный процесс, остальные листы — субпроцессы
+        head = sheet or ("Process" if any(n == "Process" for n, _ in tables) else None)
+        if head:
+            tables.sort(key=lambda item: item[0] != head)
+        elif tables[0][0] != wb.sheetnames[0]:
             issues.append(Issue("warning", None,
-                                f"Лист 'Process' не найден, читаю '{ws.title}'"))
-        return list(ws.iter_rows(values_only=True))
+                                f"Главным считаю лист '{tables[0][0]}'"))
+        return tables
     finally:
         wb.close()
 
 
+def _is_table(header) -> bool:
+    """Похож ли первый ряд листа на заголовок таблицы процесса."""
+    found = {COLUMNS.get(_norm_header(cell)) for cell in header or ()}
+    return REQUIRED_COLUMNS <= found
+
+
 def read_table(data: bytes, sheet: str | None = None) -> tuple[list[Node], list[Flow],
                                                                list[MessageFlow], list[Issue]]:
+    """Читает таблицу процесса.
+
+    В книге xlsx первый лист — весь процесс, каждый следующий — содержимое
+    субпроцесса, и имя листа должно совпадать с id этого субпроцесса. Для
+    строк такого листа parent_id проставляется сам.
+    """
     issues: list[Issue] = []
     # xlsx — это zip, начинается с PK; всё остальное считаем текстом
-    all_rows = (_sheet_rows(data, sheet, issues) if data[:2] == b"PK"
-                else _text_rows(data, issues))
+    tables = (_sheet_rows(data, sheet, issues) if data[:2] == b"PK"
+              else [("", _text_rows(data, issues))])
 
+    nodes: list[Node] = []
+    flows: list[Flow] = []
+    msgs: list[MessageFlow] = []
+    flow_ids: dict[str, int] = {}
+    sheets: list[str] = []
+
+    for index, (sheet_name, all_rows) in enumerate(tables):
+        if index:
+            sheets.append(sheet_name)
+        _read_sheet(all_rows, sheet_name if index else "",
+                    nodes, flows, msgs, flow_ids, issues)
+
+    known = {n.id for n in nodes}
+    for name in sheets:                      # лист должен указывать на субпроцесс
+        if name not in known:
+            issues.append(Issue("error", None,
+                                f"лист {name!r} не совпадает ни с одним id: имя листа "
+                                f"с субпроцессом должно повторять id его строки"))
+    return nodes, flows, msgs, issues
+
+
+def _read_sheet(all_rows: list, parent: str, nodes: list, flows: list,
+                msgs: list, flow_ids: dict, issues: list) -> None:
+    """Разбирает один лист. parent — id субпроцесса, если лист вложенный."""
     rows = iter(all_rows)
     try:
         header = next(rows)
     except StopIteration:
         raise ConvertError("Файл пустой")
+    where = f"лист {parent!r}, " if parent else ""
 
     col_map: dict[str, int] = {}
     for idx, cell in enumerate(header):
@@ -335,11 +381,6 @@ def read_table(data: bytes, sheet: str | None = None) -> tuple[list[Node], list[
             return ""
         return _s(row[idx])
 
-    nodes: list[Node] = []
-    flows: list[Flow] = []
-    msgs: list[MessageFlow] = []
-    flow_ids: dict[str, int] = {}
-
     for offset, row in enumerate(rows, start=2):
         if offset > MAX_ROWS:
             issues.append(Issue("error", None,
@@ -356,7 +397,7 @@ def read_table(data: bytes, sheet: str | None = None) -> tuple[list[Node], list[
                        else cell(row, "event_def").lower()),
             pool=cell(row, "pool"),
             lane=cell(row, "lane"),
-            parent_id=cell(row, "parent_id"),
+            parent_id=cell(row, "parent_id") or parent,
             attached_to=cell(row, "attached_to"),
             cancel_activity=_tribool(cell(row, "cancel_activity")),
             marker=cell(row, "marker").lower(),
@@ -366,7 +407,7 @@ def read_table(data: bytes, sheet: str | None = None) -> tuple[list[Node], list[
             row=offset,
         )
         if not node.id:
-            issues.append(Issue("error", offset, "не заполнена колонка id"))
+            issues.append(Issue("error", offset, f"{where}не заполнена колонка id"))
             continue
         nodes.append(node)
 
@@ -391,7 +432,6 @@ def read_table(data: bytes, sheet: str | None = None) -> tuple[list[Node], list[
                     id=f"mf_{_sanitize_id(node.id)}_{_sanitize_id(target)}",
                     source=node.id, target=target, row=offset,
                 ))
-    return nodes, flows, msgs, issues
 
 
 # --------------------------------------------------------------------------- #

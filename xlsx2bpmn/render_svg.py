@@ -127,6 +127,26 @@ def _index(root: ET.Element) -> dict[str, dict]:
     return out
 
 
+def label_extent(box: tuple[float, float, float, float], info: dict,
+                 width: float = 120) -> tuple[float, float, float, float]:
+    """Место, которое занимает подпись под фигурой.
+
+    У событий, шлюзов и документов имя пишется снаружи и легко шире самой
+    фигуры — без этого края обрезаются при кадрировании.
+    """
+    x, y, w, h = box
+    name = info.get("name", "")
+    outside = (info.get("tag") in EVENT_TAGS | GATEWAY_TYPES
+               or info.get("tag") == "dataObjectReference")
+    if not name or not outside:
+        return x, y, x + w, y + h
+    lines = _wrap(name, width)
+    text_w = max((len(line) for line in lines), default=0) * FONT * CHAR_W
+    half = max(text_w, w) / 2
+    return (x + w / 2 - half, y,
+            x + w / 2 + half, y + h + 10 + len(lines) * (FONT + 2))
+
+
 def _bounds(shape: ET.Element) -> tuple[float, float, float, float] | None:
     box = shape.find(f"{DC}Bounds")
     if box is None:
@@ -346,8 +366,39 @@ def _edge(edge: ET.Element, info: dict) -> str:
 # Точка входа
 # --------------------------------------------------------------------------- #
 
-def to_svg(xml: str | bytes, *, padding: int = PAD) -> str:
-    """Превращает BPMN с координатами в самостоятельный SVG."""
+def planes(xml: str | bytes) -> list[tuple[str, str]]:
+    """Какие уровни есть в схеме: (id полотна, подпись). Первый — весь процесс."""
+    if isinstance(xml, bytes):
+        xml = xml.decode("utf-8-sig", "replace")
+    root = ET.fromstring(xml)
+    names = _index(root)
+    out = []
+    for plane in root.findall(f".//{DI}BPMNPlane"):
+        ref = plane.get("bpmnElement", "")
+        info = names.get(ref, {})
+        out.append((ref, info.get("name") or ref))
+    return out
+
+
+def _pick_plane(root: ET.Element, level: str | None) -> ET.Element:
+    found = root.findall(f".//{DI}BPMNPlane")
+    if not found:
+        raise ConvertError("в документе нет координат (BPMNPlane); "
+                           "сначала разложите схему")
+    if not level:
+        return found[0]
+    for plane in found:
+        if plane.get("bpmnElement") == level:
+            return plane
+    have = ", ".join(p.get("bpmnElement", "") for p in found)
+    raise ConvertError(f"уровень {level!r} в схеме не найден. Есть: {have}")
+
+
+def to_svg(xml: str | bytes, *, padding: int = PAD, level: str | None = None) -> str:
+    """Превращает BPMN с координатами в самостоятельный SVG.
+
+    level — id субпроцесса, если нужен не весь процесс, а его содержимое.
+    """
     if isinstance(xml, bytes):
         xml = xml.decode("utf-8-sig", "replace")
     try:
@@ -355,11 +406,7 @@ def to_svg(xml: str | bytes, *, padding: int = PAD) -> str:
     except ET.ParseError as exc:
         raise ConvertError(f"Не удалось разобрать XML: {exc}") from exc
 
-    plane = root.find(f".//{DI}BPMNPlane")
-    if plane is None:
-        raise ConvertError("в документе нет координат (BPMNPlane); "
-                           "сначала разложите схему")
-
+    plane = _pick_plane(root, level)
     info = _index(root)
     shapes = [e for e in plane if e.tag == f"{DI}BPMNShape"]
     edges = [e for e in plane if e.tag == f"{DI}BPMNEdge"]
@@ -369,8 +416,10 @@ def to_svg(xml: str | bytes, *, padding: int = PAD) -> str:
     for shape in shapes:
         box = _bounds(shape)
         if box:
-            xs += [box[0], box[0] + box[2]]
-            ys += [box[1], box[1] + box[3]]
+            left, top, right, bottom = label_extent(
+                box, info.get(shape.get("bpmnElement", ""), {}))
+            xs += [left, right]
+            ys += [top, bottom]
     for edge in edges:
         for point in edge.findall(f"{D}waypoint"):
             xs.append(float(point.get("x", 0)))

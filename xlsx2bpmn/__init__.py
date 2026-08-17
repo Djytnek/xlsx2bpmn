@@ -24,7 +24,7 @@ from .render_png import to_png
 from .render_svg import to_svg
 from .to_table import TableResult, to_table, to_workbook
 
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 __all__ = ["convert", "apply_layout", "layout_process", "to_table", "to_workbook",
            "read_document", "to_svg", "to_png",
            "Result", "TableResult", "Issue", "ConvertError", "LayoutError"]

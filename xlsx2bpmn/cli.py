@@ -23,7 +23,7 @@ from .core import ConvertError, convert
 from .layout import LayoutError, apply_layout, pick_layout
 from .layout_native import layout_process
 from .render_png import to_png
-from .render_svg import to_svg
+from .render_svg import planes, to_svg
 from .to_table import to_table, to_workbook
 
 TEMPLATE = Path(__file__).parent / "template.xlsx"
@@ -38,9 +38,16 @@ def _looks_like_bpmn(data: bytes) -> bool:
 
 def _draw(xml: str, out: Path, args) -> str:
     """Рисует картинки рядом с результатом по ключам --svg и --png."""
+    level = getattr(args, "level", None)
+    if level == "?":
+        print("Уровни в схеме:", file=sys.stderr)
+        for ref, name in planes(xml):
+            print(f"  {ref:20} {name}", file=sys.stderr)
+        return ""
     made = []
-    for wanted, suffix, render in ((args.svg, ".svg", lambda: to_svg(xml).encode("utf-8")),
-                                   (args.png, ".png", lambda: to_png(xml))):
+    for wanted, suffix, render in (
+            (args.svg, ".svg", lambda: to_svg(xml, level=level).encode("utf-8")),
+            (args.png, ".png", lambda: to_png(xml, level=level))):
         if not wanted:
             continue
         picture = out.with_suffix(suffix)
@@ -198,6 +205,9 @@ def main() -> int:
                     help="при разборе писать текстовую таблицу, а не .xlsx")
     ap.add_argument("--svg", action="store_true",
                     help="дополнительно нарисовать картинку .svg рядом с результатом")
+    ap.add_argument("--level", metavar="ID",
+                    help="рисовать не весь процесс, а содержимое субпроцесса "
+                         "с этим id; --level ? покажет список уровней")
     ap.add_argument("--png", action="store_true",
                     help="то же, но растром .png")
     ap.add_argument("--template", metavar="PATH",

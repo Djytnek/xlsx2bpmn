@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .core import ConvertError
 from .render_svg import (ACTIVITY_TAGS, DC, DI, D, EVENT_TAGS, LABEL_BAND,
-                         _bounds, _index, _wrap)
+                         _bounds, _index, _pick_plane, _wrap, label_extent)
 from .core import GATEWAY_TYPES
 
 FONT_FILE = Path(__file__).parent / "DejaVuSans.ttf"
@@ -143,8 +143,11 @@ def _text(draw, lines, cx, cy, font, leading) -> None:
 # Точка входа
 # --------------------------------------------------------------------------- #
 
-def to_png(xml: str | bytes, scale: float = 2.0) -> bytes:
-    """Схема с координатами -> PNG. scale=2 даёт удвоенное разрешение."""
+def to_png(xml: str | bytes, scale: float = 2.0, level: str | None = None) -> bytes:
+    """Схема с координатами -> PNG. scale=2 даёт удвоенное разрешение.
+
+    level — id субпроцесса, если нужен не весь процесс, а его содержимое.
+    """
     try:
         from PIL import Image, ImageDraw
     except ImportError:
@@ -159,11 +162,7 @@ def to_png(xml: str | bytes, scale: float = 2.0) -> bytes:
     except ET.ParseError as exc:
         raise ConvertError(f"Не удалось разобрать XML: {exc}") from exc
 
-    plane = root.find(f".//{DI}BPMNPlane")
-    if plane is None:
-        raise ConvertError("в документе нет координат (BPMNPlane); "
-                           "сначала разложите схему")
-
+    plane = _pick_plane(root, level)
     info = _index(root)
     shapes = [e for e in plane if e.tag == f"{DI}BPMNShape"]
     edges = [e for e in plane if e.tag == f"{DI}BPMNEdge"]
@@ -173,8 +172,10 @@ def to_png(xml: str | bytes, scale: float = 2.0) -> bytes:
     for shape in shapes:
         box = _bounds(shape)
         if box:
-            xs += [box[0], box[0] + box[2]]
-            ys += [box[1], box[1] + box[3]]
+            left, top, right, bottom = label_extent(
+                box, info.get(shape.get("bpmnElement", ""), {}))
+            xs += [left, right]
+            ys += [top, bottom]
     for edge in edges:
         for point in edge.findall(f"{D}waypoint"):
             xs.append(float(point.get("x", 0)))
