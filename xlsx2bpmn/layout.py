@@ -14,6 +14,9 @@
 from __future__ import annotations
 
 import copy
+import os
+import subprocess
+from pathlib import Path
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
@@ -227,10 +230,18 @@ def _place_data(shapes: list[ET.Element], edges: list[ET.Element],
     if not info or not info["refs"]:
         return
 
-    # у самого dataObject фигуры быть не должно — рисуется только ссылка
-    for shape in [x for x in shapes
-                  if x.get("bpmnElement", "") in set(info.get("objects", []))]:
+    # У самого dataObject фигуры быть не должно — рисуется только ссылка.
+    # Заодно выбрасываем фигуры документов, которые расставил раскладчик:
+    # bpmn-auto-layout сваливает их столбиком в стороне, а мы ставим каждый
+    # документ вплотную к своей задаче.
+    drop = set(info.get("objects", [])) | {ref for ref, _ in info["refs"]}
+    for shape in [x for x in shapes if x.get("bpmnElement", "") in drop]:
         shapes.remove(shape)
+
+    # стрелки ассоциаций тоже перерисуем сами — от новых мест
+    for edge in [e for e in edges
+                 if e.get("bpmnElement", "") in {a for a, _, _, _ in info["assoc"]}]:
+        edges.remove(edge)
 
     boxes: dict[str, Box] = {}
     for shape in shapes:
@@ -419,6 +430,63 @@ def merge_layout(xml: str, laid: dict[str, str], meta: dict) -> tuple[str, list[
 # --------------------------------------------------------------------------- #
 # Точка входа
 # --------------------------------------------------------------------------- #
+
+def node_script() -> Path | None:
+    """Ищет необязательный раскладчик на Node. Сеть при этом не трогается."""
+    found = [Path(p) for p in (os.getenv("XLSX2BPMN_NODE_SCRIPT"),) if p]
+    found += [Path.cwd() / "layout-node" / "cli.mjs",
+              Path(__file__).parent.parent / "layout-node" / "cli.mjs"]
+    for path in found:
+        if path.is_file() and (path.parent / "node_modules").is_dir():
+            return path
+    return None
+
+
+def node_layout(script: Path):
+    """Обёртка над bpmn-auto-layout: XML внутрь, XML с координатами наружу."""
+    def run(single_xml: str) -> str:
+        try:
+            done = subprocess.run(
+                ["node", str(script)], input=strip_lanes(single_xml).encode("utf-8"),
+                capture_output=True, timeout=120, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise LayoutError(f"не удалось запустить node: {exc}") from exc
+        if done.returncode != 0:
+            raise LayoutError("bpmn-auto-layout: "
+                              f"{done.stderr.decode('utf-8', 'replace')[:300]}")
+        return done.stdout.decode("utf-8")
+    return run
+
+
+def pick_layout(choice: str = "auto"):
+    """Раскладчик по имени.
+
+    node — bpmn-auto-layout: процесс он ведёт ровнее, но про дорожки не знает.
+    native — встроенный: дорожки соблюдает, линию ведёт хуже.
+    auto — node, если установлен, иначе встроенный.
+    """
+    from .layout_native import layout_process
+
+    if choice == "native":
+        return layout_process
+    script = node_script()
+    if choice == "node":
+        if script is None:
+            raise LayoutError(
+                "Node-раскладчик не установлен. Поставьте его: "
+                "cd layout-node && npm install. Или используйте --layout native")
+        return node_layout(script)
+    return node_layout(script) if script else layout_process
+
+
+def strip_lanes(xml: str) -> str:
+    """Убирает laneSet. Нужен внешним раскладчикам, которые про дорожки не знают."""
+    root = ET.fromstring(xml)
+    for proc in root.findall(f"{B}process"):
+        for lane_set in proc.findall(f"{B}laneSet"):
+            proc.remove(lane_set)
+    return ET.tostring(root, encoding="unicode", xml_declaration=True)
+
 
 def apply_layout(xml: str, layout_fn) -> tuple[str, list[str]]:
     docs, meta = split_processes(xml)

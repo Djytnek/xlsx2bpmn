@@ -1,7 +1,7 @@
 """
 title: BPMN-схема
 author: xlsx2bpmn
-version: 1.5.0
+version: 1.6.0
 description: Описание процесса словами -> BPMN-схема с картинкой. Правится в диалоге. Понимает и обратный ход: пришлите .bpmn — получите разбор.
 """
 
@@ -28,7 +28,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from xlsx2bpmn import apply_layout, convert, layout_process, to_table
+from xlsx2bpmn import apply_layout, convert, to_table
+from xlsx2bpmn.layout import pick_layout
 from xlsx2bpmn.core import ConvertError
 from xlsx2bpmn.read_doc import read_document
 from xlsx2bpmn.render_png import to_png
@@ -327,7 +328,7 @@ class Pipe:
                 note += f"\n\nЧто не уложилось в таблицу:\n{losses}"
             try:
                 ready, _ = apply_layout(convert(parsed.table.encode()).xml,
-                                        layout_process)
+                                        pick_layout())
             except Exception:                                      # noqa: BLE001
                 ready = diagram
             return self._reply(parsed.table, ready, note)
@@ -375,7 +376,7 @@ class Pipe:
             if built is not None and built.ok:
                 await say("Рисую схему…")
                 try:
-                    xml, _ = apply_layout(built.xml, layout_process)
+                    xml, _ = apply_layout(built.xml, pick_layout())
                 except Exception as exc:                           # noqa: BLE001
                     await say("Сбой раскладки", True)
                     return f"Схема собралась, но не разложилась: {exc}"

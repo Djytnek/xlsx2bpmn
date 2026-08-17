@@ -20,7 +20,7 @@ from pathlib import Path
 
 from . import __version__
 from .core import ConvertError, convert
-from .layout import LayoutError, apply_layout
+from .layout import LayoutError, apply_layout, pick_layout
 from .layout_native import layout_process
 from .render_png import to_png
 from .render_svg import to_svg
@@ -99,7 +99,7 @@ def _table_one(path: Path, out: Path, args) -> int:
         rebuilt = convert(result.table.encode("utf-8"))
         if rebuilt.ok:
             try:
-                source, _ = apply_layout(rebuilt.xml, layout_process)
+                source, _ = apply_layout(rebuilt.xml, pick_layout(args.layout))
             except LayoutError:
                 pass
     picture = _draw(source, out, args)
@@ -145,7 +145,7 @@ def _convert_one(path: Path, out: Path, args) -> int:
     xml = result.xml
     if not args.no_layout:
         try:
-            xml, extra = apply_layout(xml, layout_process)
+            xml, extra = apply_layout(xml, pick_layout(args.layout))
             lines += [f"[файл] WARN  {w}" for w in extra]
         except LayoutError as exc:
             print(f"{path.name}: ERROR раскладка не выполнена: {exc}", file=sys.stderr)
@@ -206,6 +206,10 @@ def main() -> int:
     ap.add_argument("--target", choices=["plain", "camunda8"], default="plain")
     ap.add_argument("--no-layout", action="store_true",
                     help="не расставлять координаты: только структура BPMN")
+    ap.add_argument("--layout", choices=["auto", "native", "node"], default="auto",
+                    help="auto (по умолчанию) — bpmn-auto-layout, если установлен, "
+                         "иначе встроенный; native — только встроенный, он "
+                         "единственный понимает дорожки; node — только внешний")
     ap.add_argument("--strict", action="store_true",
                     help="предупреждения блокируют генерацию")
     ap.add_argument("--executable", action="store_true")
