@@ -15,12 +15,14 @@ from __future__ import annotations
 import argparse
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 from . import __version__
 from .core import SUBPROCESS_TYPES, ConvertError, convert
-from .layout import LayoutError, apply_layout, layout_name, pick_layout
+from .layout import (LayoutError, apply_layout, layout_hint, layout_name,
+                     node_home, pick_layout)
 from .layout_native import layout_process
 from .render_png import to_png
 from .render_svg import to_svg
@@ -31,6 +33,44 @@ TEMPLATE = Path(__file__).parent / "template.xlsx"
 BPMN_HEAD = re.compile(rb"<\s*(\w+:)?definitions", re.I)
 PICTURES = {".png", ".svg"}
 NAME_BAD = re.compile(r'[\\/:*?"<>|]+')
+
+
+def _setup_layout() -> int:
+    """Доустанавливает bpmn-auto-layout. Единственное место, где нужна сеть."""
+    source = node_home()
+    if source is None:
+        print("ERROR не найден файл раскладчика cli.mjs", file=sys.stderr)
+        return 2
+    if shutil.which("npm") is None:
+        print("ERROR не найден npm. Нужен Node.js 20 или новее: "
+              "https://nodejs.org", file=sys.stderr)
+        return 2
+
+    # ставим в домашнюю папку: site-packages бывает недоступен на запись,
+    # а этот путь ищется первым
+    home = Path.home() / ".xlsx2bpmn" / "layout-node"
+    try:
+        home.mkdir(parents=True, exist_ok=True)
+        for name in ("cli.mjs", "package.json"):
+            if (source / name).is_file():
+                shutil.copyfile(source / name, home / name)
+    except OSError as exc:
+        print(f"ERROR не удалось подготовить {home}: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"Ставлю bpmn-auto-layout в {home} ...")
+    try:
+        code = subprocess.call(["npm", "install", "--no-audit", "--no-fund"],
+                               cwd=home)
+    except OSError as exc:
+        print(f"ERROR npm не запустился: {exc}", file=sys.stderr)
+        return 2
+    if code != 0:
+        print("ERROR npm вернул ошибку. Проверьте интернет и версию Node",
+              file=sys.stderr)
+        return 2
+    print(f"Готово. Раскладчик: {layout_name('auto')}")
+    return 0
 
 
 def _looks_like_bpmn(data: bytes) -> bool:
@@ -302,7 +342,8 @@ def _convert_one(path: Path, out: Path, args) -> int:
             s = result.stats
             print(f"OK -> {made[3:]}  элементов {s['nodes']}, потоков {s['flows']}, "
                   f"сообщений {s['message_flows']}, пулов {s['pools']}, "
-                  f"раскладка: {layout_name(args.layout)}")
+                  f"раскладка: {layout_name(args.layout)}"
+                  f"{layout_hint(args.layout)}")
         return 0
 
     out.write_text(xml, encoding="utf-8")
@@ -312,7 +353,8 @@ def _convert_one(path: Path, out: Path, args) -> int:
         engine = "нет" if args.no_layout else layout_name(args.layout)
         print(f"OK -> {out}{picture}  элементов {s['nodes']}, потоков {s['flows']}, "
               f"сообщений {s['message_flows']}, пулов {s['pools']}, "
-              f"раскладка: {engine}")
+              f"раскладка: {engine}"
+              f"{'' if args.no_layout else layout_hint(args.layout)}")
     return 0
 
 
@@ -347,6 +389,9 @@ def main() -> int:
                          "перекрывается ключом -o")
     ap.add_argument("--png", action="store_true",
                     help="то же, но растром .png")
+    ap.add_argument("--setup-layout", action="store_true",
+                    help="доустановить bpmn-auto-layout — с ним схема ровнее. "
+                         "Единственная команда, которой нужен интернет")
     ap.add_argument("--template", metavar="PATH",
                     help="создать пустой шаблон таблицы по этому пути и выйти")
     ap.add_argument("--sheet", default=None, help="имя листа (по умолчанию Process)")
@@ -363,6 +408,9 @@ def main() -> int:
     ap.add_argument("--report", help="файл для отчёта")
     ap.add_argument("-q", "--quiet", action="store_true")
     args = ap.parse_args()
+
+    if args.setup_layout:
+        return _setup_layout()
 
     if args.template:
         dest = Path(args.template)

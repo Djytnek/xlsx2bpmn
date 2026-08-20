@@ -3,7 +3,7 @@
 Ставится отдельно и только если нужен:
 
 ```bash
-cd layout-node
+cd ~/.xlsx2bpmn/layout-node   # либо xlsx2bpmn --setup-layout
 npm install
 ```
 

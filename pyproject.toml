@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xlsx2bpmn"
-version = "1.8.0"
 description = "Таблица процесса <-> BPMN 2.0 XML с координатами. Работает офлайн."
 readme = "README.md"
 requires-python = ">=3.10"
+dynamic = ["version"]
 dependencies = ["openpyxl>=3.1", "pillow>=10.0"]
 
 [project.optional-dependencies]
@@ -21,5 +21,11 @@ bpmn2xlsx = "xlsx2bpmn.cli:main"
 [tool.setuptools]
 packages = ["xlsx2bpmn"]
 
+[tool.setuptools.dynamic]
+# версия одна и та же в пакете и в коде — расходиться им нельзя
+version = {attr = "xlsx2bpmn.__version__"}
+
 [tool.setuptools.package-data]
-xlsx2bpmn = ["template.xlsx", "prompt.md", "DejaVuSans.ttf"]
+xlsx2bpmn = ["template.xlsx", "prompt.md", "DejaVuSans.ttf",
+             "layout-node/cli.mjs", "layout-node/package.json",
+             "layout-node/README.md"]

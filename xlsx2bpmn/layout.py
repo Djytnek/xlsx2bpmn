@@ -534,12 +534,32 @@ def merge_layout(xml: str, laid: dict[str, str], meta: dict) -> tuple[str, list[
 # Точка входа
 # --------------------------------------------------------------------------- #
 
-def node_script() -> Path | None:
-    """Ищет необязательный раскладчик на Node. Сеть при этом не трогается."""
+def node_places() -> list[Path]:
+    """Где может лежать раскладчик на Node — в порядке предпочтения.
+
+    Скрипт едет вместе с пакетом, поэтому после `pip install` он на месте,
+    и `npm install` достаточно сделать один раз в названной папке.
+    """
     found = [Path(p) for p in (os.getenv("XLSX2BPMN_NODE_SCRIPT"),) if p]
-    found += [Path.cwd() / "layout-node" / "cli.mjs",
-              Path(__file__).parent.parent / "layout-node" / "cli.mjs"]
-    for path in found:
+    return found + [
+        Path.home() / ".xlsx2bpmn" / "layout-node" / "cli.mjs",
+        Path(__file__).parent / "layout-node" / "cli.mjs",      # рядом с пакетом
+        Path.cwd() / "layout-node" / "cli.mjs",
+        Path(__file__).parent.parent / "layout-node" / "cli.mjs",
+    ]
+
+
+def node_home() -> Path | None:
+    """Папка раскладчика, даже если npm install в ней ещё не делали."""
+    for path in node_places():
+        if path.is_file():
+            return path.parent
+    return None
+
+
+def node_script() -> Path | None:
+    """Ищет готовый к работе раскладчик на Node. Сеть при этом не трогается."""
+    for path in node_places():
         if path.is_file() and (path.parent / "node_modules").is_dir():
             return path
     return None
@@ -570,6 +590,14 @@ def layout_name(choice: str = "auto") -> str:
     return "недоступен" if choice == "node" else "встроенный"
 
 
+def layout_hint(choice: str = "auto") -> str:
+    """Подсказка, если схему разложил запасной раскладчик, а лучший не стоит."""
+    if choice == "auto" and node_script() is None:
+        return ("  (схему можно вести ровнее: "
+                "поставьте раскладчик командой  xlsx2bpmn --setup-layout)")
+    return ""
+
+
 def pick_layout(choice: str = "auto"):
     """Раскладчик по имени.
 
@@ -586,7 +614,8 @@ def pick_layout(choice: str = "auto"):
         if script is None:
             raise LayoutError(
                 "Node-раскладчик не установлен. Поставьте его: "
-                "cd layout-node && npm install. Или используйте --layout native")
+                f"cd {node_home() or 'layout-node'} && npm install. "
+                "Или используйте --layout native")
         return node_layout(script)
     return node_layout(script) if script else layout_process
 
