@@ -413,10 +413,9 @@ def main() -> int:
     ap.add_argument("--no-layout", action="store_true",
                     help="не расставлять координаты: только структура BPMN")
     ap.add_argument("--layout", choices=["auto", "native", "node"], default="auto",
-                    help="auto (по умолчанию) — по схеме: с дорожками встроенный, "
-                         "он единственный их понимает, без дорожек "
-                         "bpmn-auto-layout, он ведёт процесс ровнее. "
-                         "native и node — взять один и тот же принудительно")
+                    help="auto (по умолчанию) — bpmn-auto-layout, если в системе "
+                         "есть Node; дорожки при этом достраиваются нами. "
+                         "native — встроенный раскладчик на Python, без Node")
     ap.add_argument("--strict", action="store_true",
                     help="предупреждения блокируют генерацию")
     ap.add_argument("--executable", action="store_true")

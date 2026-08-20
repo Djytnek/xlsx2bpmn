@@ -584,12 +584,68 @@ def node_script() -> Path | None:
     return None
 
 
+def main_first(single_xml: str) -> str:
+    """Ставит главную ветку первой — по ней bpmn-auto-layout ведёт прямую линию.
+
+    Он берёт первую исходящую как продолжение строки, а остальные уводит вниз
+    (в его же исходнике на этом месте стоит «TODO: sort by priority»). Если
+    первой в таблице оказалась короткая ветка вроде «Нет → Конец», главной
+    линией станет она, а вся работа уедет вниз и вбок. Порядок исходящих на
+    смысл не влияет, поэтому переставляем: первой идёт та ветка, за которой
+    стоит больше процесса.
+    """
+    try:
+        root = ET.fromstring(single_xml)
+    except ET.ParseError:
+        return single_xml
+
+    flows: dict[str, str] = {}                  # id потока -> куда ведёт
+    after: dict[str, list[str]] = {}
+    for flow in root.iter(f"{B}sequenceFlow"):
+        source, target = flow.get("sourceRef", ""), flow.get("targetRef", "")
+        flows[flow.get("id", "")] = target
+        after.setdefault(source, []).append(target)
+
+    known: dict[str, int] = {}
+
+    def weight(start: str) -> int:
+        """Сколько элементов стоит за этой веткой."""
+        if start in known:
+            return known[start]
+        seen, stack = {start}, [start]
+        while stack:
+            for nxt in after.get(stack.pop(), ()):
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append(nxt)
+        known[start] = len(seen)
+        return known[start]
+
+    changed = False
+    for node in root.iter():
+        outs = node.findall(f"{B}outgoing")
+        if len(outs) < 2:
+            continue
+        ids = [(o.text or "").strip() for o in outs]
+        order = sorted(range(len(ids)),
+                       key=lambda i: (-weight(flows.get(ids[i], "")), i))
+        if order != list(range(len(ids))):
+            changed = True
+            for element, i in zip(outs, order):
+                element.text = ids[i]
+
+    if not changed:
+        return single_xml
+    return ET.tostring(root, encoding="unicode", xml_declaration=True)
+
+
 def node_layout(script: Path):
     """Обёртка над bpmn-auto-layout: XML внутрь, XML с координатами наружу."""
     def run(single_xml: str) -> str:
+        ready = strip_lanes(main_first(single_xml))
         try:
             done = subprocess.run(
-                ["node", str(script)], input=strip_lanes(single_xml).encode("utf-8"),
+                ["node", str(script)], input=ready.encode("utf-8"),
                 capture_output=True, timeout=120, check=False)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise LayoutError(f"не удалось запустить node: {exc}") from exc
@@ -600,13 +656,110 @@ def node_layout(script: Path):
     return run
 
 
+LANE_GAP = 40        # зазор между полосами ролей
+ROW_GAP = 24         # зазор между строками внутри одной полосы
+COL_GAP = 40         # на столько элементы расходятся по горизонтали
+
+
+def lane_layout(single_xml: str, run) -> str:
+    """Процесс ведёт bpmn-auto-layout, а по дорожкам раскладываем мы.
+
+    Он про дорожки не знает и выстраивает всё одной строкой, из-за чего роли
+    перестают совпадать с полосами. Но столбцы — кто за кем идёт — он считает
+    лучше нашего. Поэтому берём у него X, а Y расставляем сами: каждый
+    элемент опускается в полосу своей роли, а внутри полосы то, что налезает
+    друг на друга по горизонтали, разъезжается на отдельные строки.
+    """
+    source = ET.fromstring(single_xml)
+    lanes = [[(r.text or "").strip() for r in lane.findall(f"{B}flowNodeRef")]
+             for lane in source.iter(f"{B}lane")]
+    if not any(lanes):
+        return run(single_xml)
+
+    root = ET.fromstring(run(single_xml))
+    plane = root.find(f".//{DI}BPMNPlane")
+    if plane is None:
+        raise LayoutError("bpmn-auto-layout не вернул полотно")
+
+    boxes: dict[str, ET.Element] = {}
+    for shape in plane:
+        if shape.tag == f"{DI}BPMNShape":
+            bounds = shape.find(f"{DC}Bounds")
+            if bounds is not None:
+                boxes[shape.get("bpmnElement", "")] = bounds
+
+    # граничные события не расставляем: они едут на краю своей задачи
+    hosts = {b.get("id", ""): b.get("attachedToRef", "")
+             for b in source.iter(f"{B}boundaryEvent")}
+
+    top = 0.0
+    for refs in lanes:
+        members = [boxes[rid] for rid in refs if rid in boxes and rid not in hosts]
+        if not members:
+            continue
+        members.sort(key=lambda b: (float(b.get("x", 0)), float(b.get("y", 0))))
+
+        rows: list[list[tuple[float, float]]] = []
+        where: list[int] = []
+        for bounds in members:
+            left = float(bounds.get("x", 0))
+            right = left + float(bounds.get("width", 0))
+            for i, row in enumerate(rows):
+                if all(left >= b + COL_GAP or right <= a - COL_GAP for a, b in row):
+                    row.append((left, right))
+                    where.append(i)
+                    break
+            else:
+                rows.append([(left, right)])
+                where.append(len(rows) - 1)
+
+        highest = [0.0] * len(rows)
+        for bounds, i in zip(members, where):
+            highest[i] = max(highest[i], float(bounds.get("height", 0)))
+        starts, y = [], top
+        for height in highest:
+            starts.append(y)
+            y += height + ROW_GAP
+        for bounds, i in zip(members, where):
+            own = float(bounds.get("height", 0))
+            bounds.set("y", _num(starts[i] + (highest[i] - own) / 2))
+        top = y - ROW_GAP + LANE_GAP
+
+    for event, host in hosts.items():
+        if event in boxes and host in boxes:
+            near, mine = boxes[host], boxes[event]
+            mine.set("x", _num(float(near.get("x", 0))
+                               + float(near.get("width", 0)) * 0.7
+                               - float(mine.get("width", 0)) / 2))
+            mine.set("y", _num(float(near.get("y", 0)) + float(near.get("height", 0))
+                               - float(mine.get("height", 0)) / 2))
+
+    # стрелки после переезда никуда не годятся — сводим концы, остальное
+    # доделает развод маршрутов
+    for edge in [e for e in plane if e.tag == f"{DI}BPMNEdge"]:
+        plane.remove(edge)
+    for flow in source.iter(f"{B}sequenceFlow"):
+        ends = [boxes.get(flow.get("sourceRef", "")), boxes.get(flow.get("targetRef", ""))]
+        if any(e is None for e in ends):
+            continue
+        edge = ET.SubElement(plane, f"{DI}BPMNEdge",
+                             {"id": f"{flow.get('id', '')}_di",
+                              "bpmnElement": flow.get("id", "")})
+        for bounds in ends:
+            ET.SubElement(edge, f"{D}waypoint", {
+                "x": _num(float(bounds.get("x", 0)) + float(bounds.get("width", 0)) / 2),
+                "y": _num(float(bounds.get("y", 0)) + float(bounds.get("height", 0)) / 2)})
+
+    return ET.tostring(root, encoding="unicode", xml_declaration=True)
+
+
 def layout_name(choice: str = "auto") -> str:
     """Какой раскладчик будет использован — чтобы писать это в вывод."""
     if choice == "native":
         return "встроенный"
     if choice == "node":
         return "bpmn-auto-layout" if node_script() is not None else "недоступен"
-    return "по схеме" if node_script() is not None else "встроенный"
+    return "bpmn-auto-layout" if node_script() is not None else "встроенный"
 
 
 def has_lanes(single_xml: str) -> bool:
@@ -618,15 +771,13 @@ def has_lanes(single_xml: str) -> bool:
 
 
 def smart_layout(script: Path | None):
-    """Раскладчик по схеме, а не по настроению.
+    """Процесс ведёт bpmn-auto-layout, дорожки достраиваем мы.
 
-    С дорожками справляется только встроенный: каждой роли своя полоса, и
-    элемент не уезжает в чужую. bpmn-auto-layout про дорожки не знает и
-    выстраивает всё одной строкой — роли перестают совпадать с полосами,
-    а это уже искажение смысла, а не косметика.
+    Он считает столбцы — кто за кем идёт — лучше нашего, но про дорожки не
+    знает и валит всё одной строкой. Поэтому схему с дорожками отдаём ему
+    без laneSet, а потом сами опускаем каждый элемент в полосу его роли.
 
-    Без дорожек всё наоборот: bpmn-auto-layout ведёт процесс заметно ровнее,
-    его и берём.
+    Встроенный раскладчик остаётся на случай, когда Node в системе нет.
     """
     from .layout_native import layout_process
 
@@ -634,9 +785,14 @@ def smart_layout(script: Path | None):
     used: set[str] = set()
 
     def run(single_xml: str) -> str:
-        if node is not None and not has_lanes(single_xml):
-            used.add("bpmn-auto-layout")
-            return node(single_xml)
+        if node is not None:
+            try:
+                used.add("bpmn-auto-layout")
+                if has_lanes(single_xml):
+                    return lane_layout(single_xml, node)
+                return node(single_xml)
+            except LayoutError:
+                used.discard("bpmn-auto-layout")
         used.add("встроенный")
         return layout_process(single_xml)
 
@@ -656,9 +812,9 @@ def layout_hint(choice: str = "auto") -> str:
     """Подсказка, если схему разложил запасной раскладчик, а лучший не стоит."""
     if choice == "auto" and node_script() is None:
         if not has_node():
-            return ("  (схему без дорожек можно вести ровнее, но для этого "
-                    "нужен Node.js 20+: https://nodejs.org)")
-        return ("  (схему без дорожек можно вести ровнее: "
+            return ("  (схему можно вести заметно ровнее, но для этого нужен "
+                    "Node.js 20+: https://nodejs.org)")
+        return ("  (схему можно вести ровнее: "
                 "поставьте раскладчик командой  xlsx2bpmn --setup-layout)")
     return ""
 
@@ -666,9 +822,9 @@ def layout_hint(choice: str = "auto") -> str:
 def pick_layout(choice: str = "auto"):
     """Раскладчик по имени.
 
-    node — bpmn-auto-layout: процесс он ведёт ровнее, но про дорожки не знает.
-    native — встроенный: дорожки соблюдает, линию ведёт хуже.
-    auto — по схеме: с дорожками встроенный, без них bpmn-auto-layout.
+    node — bpmn-auto-layout: он ведёт процесс, дорожки достраиваем мы.
+    native — встроенный, на чистом Python: нужен там, где нет Node.
+    auto — bpmn-auto-layout, если Node есть, иначе встроенный.
     """
     from .layout_native import layout_process
 
