@@ -161,17 +161,55 @@ def crossings(xml: str) -> list[str]:
     return bad
 
 
+def docks(xml: str) -> dict:
+    """Стрелки, севшие в одну и ту же точку. Должно быть пусто.
+
+    Две стрелки из одной точки читаются как одна: у развилки не видно, где
+    какой ответ. Поэтому причалы разводятся — по разным сторонам, а если
+    сторону приходится делить, то со сдвигом вдоль неё.
+    """
+    root = ET.fromstring(xml)
+    out = {}
+    for plane in root.iter(f"{DI}BPMNPlane"):
+        seen: dict = {}
+        for edge in plane:
+            if edge.tag != f"{DI}BPMNEdge":
+                continue
+            points = _points(edge)
+            if len(points) < 2:
+                continue
+            for end in (points[0], points[-1]):
+                key = (round(end[0]), round(end[1]))
+                seen.setdefault(key, []).append(edge.get("bpmnElement", "?"))
+        out.update({k: v for k, v in seen.items() if len(v) > 1})
+    return out
+
+
 def check_arrows() -> None:
-    """Главное правило картинки: стрелка не проходит сквозь плашку."""
+    """Главные правила картинки: сквозь плашку не ходим, причалы не делим."""
     for name, data in (("шаблон", TEMPLATE.read_bytes()),
                        ("субпроцессы", SUBPROCESS_TABLE.encode("utf-8")),
-                       ("документы", LEVELS_TABLE.encode("utf-8"))):
+                       ("документы", LEVELS_TABLE.encode("utf-8")),
+                       ("развилки", GATEWAY_TABLE.encode("utf-8"))):
         result = convert(data)
         assert result.ok, [str(i) for i in result.issues]
         xml, _ = apply_layout(result.xml, layout_process)
         bad = crossings(xml)
         assert not bad, f"{name}: стрелки идут сквозь плашки: {bad}"
-    print("стрелки: ни одна не проходит сквозь плашку")
+        same = docks(xml)
+        assert not same, f"{name}: стрелки вышли из одной точки: {same}"
+    print("стрелки: сквозь плашки не ходят, из одной точки не выходят")
+
+
+GATEWAY_TABLE = """id|name|type|pool|next
+s|Start Control|startEvent|ООО|t1
+t1|Контроль устранения уязвимостей|userTask|ООО|g1
+g1|Обнаружено нарушение сроков?|exclusiveGateway|ООО|t2 [Да] {есть}; *e [Нет]
+t2|Информировать Директора|userTask|ООО|g2
+g2|Решение получено за 3 дня?|exclusiveGateway|ООО|t3 [Да] {решено}; *t4 [Нет]
+t3|Документировать обработку|userTask|ООО|e
+t4|Эскалировать Начальнику|userTask|ООО|e
+e|End Control|endEvent|ООО|"""
 
 
 LEVELS_TABLE = """id|name|type|pool|lane|parent_id|next|data_in|data_out

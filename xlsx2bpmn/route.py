@@ -33,6 +33,8 @@ CROSS = 250      # цена пересечения с чужой стрелко�
 OVER = 2.0       # цена каждого пикселя, пройденного по чужой линии
 KEEP = 60        # скидка действующему маршруту: без пользы не дёргаем
 SIDE = 40        # штраф за выход не с той стороны, куда стрелка идёт
+SLOT = 600       # штраф за причал, занятый другой стрелкой этой же плашки
+STEP = 22        # на столько разводятся причалы, если сторону приходится делить
 BUSY = 30        # штраф поиску за линию сетки, уже кем-то занятую
 GAP = 6          # ближе этого две параллельные линии сливаются в одну
 CELL = 200       # клетка индекса соседей, в пикселях
@@ -285,8 +287,80 @@ def _cost(points: Path) -> float:
 # Простые обходы — то, как линию провёл бы человек
 # --------------------------------------------------------------------------- #
 
-def _gates(box: Box, other: Box) -> dict:
-    """Причалы плашки: сторона -> (точка на плашке, точка отхода, ось, штраф)."""
+def _shift(taken: int, room: float) -> float:
+    """Сдвиг причала вдоль стороны: 0, +22, -22, +44 ... Не вылезает за края.
+
+    Пока сторона свободна, причал стоит в середине — так и положено. Если её
+    приходится делить, причалы разъезжаются; на маленькой фигуре, где 22 не
+    помещаются, разъезжаются на сколько есть. Совпадение точка в точку хуже
+    любого сдвига: две стрелки, вышедшие из одного места, читаются как одна.
+    """
+    if taken <= 0 or room < 8:
+        return 0.0
+    step = min(STEP, room)
+    return ((taken + 1) // 2) * step * (1 if taken % 2 else -1)
+
+
+def _nudge(path: Path, box: Box, taken: list, at_start: bool) -> Path:
+    """Сдвигает причал вдоль стороны, если ровно эта точка уже занята.
+
+    Страховка на случай, когда сам маршрут пришёл из поиска: тот ведёт линию
+    по узлам сетки, а сдвинутых причалов в сетке нет.
+    """
+    if len(path) < 3:
+        return path
+    i, j = (0, 1) if at_start else (len(path) - 1, len(path) - 2)
+    if not _busy_at(path[i], taken):
+        return path
+    side = _side_of(box, path[i])
+    if side == "?":
+        return path
+
+    along_y = side in ("r", "l")
+    room = (box.h / 2 - 8) if along_y else (box.w / 2 - 8)
+    # соседняя точка едет вместе, иначе отрезок перестанет быть прямым
+    if along_y and abs(path[i][1] - path[j][1]) > EPS:
+        return path
+    if not along_y and abs(path[i][0] - path[j][0]) > EPS:
+        return path
+
+    for k in range(1, 6):
+        shift = _shift(k, max(room, 8))
+        spot = ((path[i][0], path[i][1] + shift) if along_y
+                else (path[i][0] + shift, path[i][1]))
+        if _busy_at(spot, taken):
+            continue
+        out = list(path)
+        out[i] = spot
+        out[j] = ((path[j][0], path[j][1] + shift) if along_y
+                  else (path[j][0] + shift, path[j][1]))
+        return out
+    return path
+
+
+def _side_of(box: Box, point: Point) -> str:
+    """С какой стороны плашки висит эта точка."""
+    if abs(point[0] - box.right) < 2:
+        return "r"
+    if abs(point[0] - box.x) < 2:
+        return "l"
+    if abs(point[1] - box.y) < 2:
+        return "t"
+    if abs(point[1] - box.bottom) < 2:
+        return "b"
+    return "?"
+
+
+def _gates(box: Box, other: Box, taken: list | None = None) -> dict:
+    """Причалы плашки: сторона -> (точка на плашке, точка отхода, ось, штраф).
+
+    taken — куда уже причалены другие стрелки этой плашки: (сторона, x, y).
+    Занятую сторону причал делит со сдвигом, чтобы линии не легли одна на
+    другую, а совпадение точка в точку стоит непозволительно дорого.
+    """
+    busy: dict = {}
+    for side, _x, _y in (taken or ()):
+        busy[side] = busy.get(side, 0) + 1
     natural = set()
     if other.cx > box.right:
         natural.add("r")
@@ -299,55 +373,76 @@ def _gates(box: Box, other: Box) -> dict:
     if not natural:                           # плашки стоят друг на друге
         natural = {"r", "l", "t", "b"}
 
+    down = _shift(busy.get("r", 0), box.h / 2 - 8), _shift(busy.get("l", 0), box.h / 2 - 8)
+    across = _shift(busy.get("t", 0), box.w / 2 - 8), _shift(busy.get("b", 0), box.w / 2 - 8)
     sides = {
-        "r": ((box.right, box.cy), (box.right + MARGIN, box.cy), 0),
-        "l": ((box.x, box.cy), (box.x - MARGIN, box.cy), 0),
-        "t": ((box.cx, box.y), (box.cx, box.y - MARGIN), 1),
-        "b": ((box.cx, box.bottom), (box.cx, box.bottom + MARGIN), 1),
+        "r": ((box.right, box.cy + down[0]),
+              (box.right + MARGIN, box.cy + down[0]), 0),
+        "l": ((box.x, box.cy + down[1]),
+              (box.x - MARGIN, box.cy + down[1]), 0),
+        "t": ((box.cx + across[0], box.y),
+              (box.cx + across[0], box.y - MARGIN), 1),
+        "b": ((box.cx + across[1], box.bottom),
+              (box.cx + across[1], box.bottom + MARGIN), 1),
     }
-    return {name: (dock, stub, axis, 0 if name in natural else SIDE)
-            for name, (dock, stub, axis) in sides.items()}
+    out = {}
+    for name, (dock, stub, axis) in sides.items():
+        penalty = 0 if name in natural else SIDE
+        if _busy_at(dock, taken):
+            penalty += SLOT
+        out[name] = (dock, stub, axis, penalty)
+    return out
 
 
-def _simple(src: Box, tgt: Box) -> list[Path]:
-    """Прямая, угол и скобка на всех разумных причалах."""
-    out: list[Path] = []
-    here, there = _gates(src, tgt), _gates(tgt, src)
-    for _sn, (sdock, sstub, saxis, spen) in here.items():
-        if spen:
-            continue                          # только естественные стороны
-        for _tn, (tdock, tstub, taxis, tpen) in there.items():
-            if tpen:
-                continue
+def _busy_at(point: Point, taken: list | None) -> bool:
+    """Занята ли уже ровно эта точка причала."""
+    return any(abs(point[0] - x) < GAP and abs(point[1] - y) < GAP
+               for _side, x, y in (taken or ()))
+
+
+def _simple(src: Box, tgt: Box, taken_src: list | None = None,
+            taken_tgt: list | None = None) -> list[tuple[Path, str, str, float]]:
+    """Прямая, угол и скобка на всех сторонах: (маршрут, откуда, куда, штраф).
+
+    Стороны перебираются все, а не только естественные: когда естественная
+    занята другой стрелкой, соседняя оказывается дешевле.
+    """
+    out: list[tuple[Path, str, str, float]] = []
+    here = _gates(src, tgt, taken_src)
+    there = _gates(tgt, src, taken_tgt)
+    for sname, (sdock, sstub, saxis, spen) in here.items():
+        for tname, (tdock, tstub, taxis, tpen) in there.items():
+            paths: list[Path] = []
             if saxis == taxis == 0:
                 if abs(sstub[1] - tstub[1]) < EPS:
-                    out.append([sdock, tdock])
+                    paths.append([sdock, tdock])
                 middle = (sstub[0] + tstub[0]) / 2
                 for shift in (0, 30, -30, 60, -60):
                     x = middle + shift
-                    out.append([sdock, sstub, (x, sstub[1]),
-                                (x, tstub[1]), tstub, tdock])
+                    paths.append([sdock, sstub, (x, sstub[1]),
+                                  (x, tstub[1]), tstub, tdock])
                 for y in (min(src.y, tgt.y) - MARGIN - 20,
                           max(src.bottom, tgt.bottom) + MARGIN + 20):
-                    out.append([sdock, sstub, (sstub[0], y),
-                                (tstub[0], y), tstub, tdock])
+                    paths.append([sdock, sstub, (sstub[0], y),
+                                  (tstub[0], y), tstub, tdock])
             elif saxis == taxis == 1:
                 if abs(sstub[0] - tstub[0]) < EPS:
-                    out.append([sdock, tdock])
+                    paths.append([sdock, tdock])
                 middle = (sstub[1] + tstub[1]) / 2
                 for shift in (0, 30, -30, 60, -60):
                     y = middle + shift
-                    out.append([sdock, sstub, (sstub[0], y),
-                                (tstub[0], y), tstub, tdock])
+                    paths.append([sdock, sstub, (sstub[0], y),
+                                  (tstub[0], y), tstub, tdock])
                 for x in (min(src.x, tgt.x) - MARGIN - 20,
                           max(src.right, tgt.right) + MARGIN + 20):
-                    out.append([sdock, sstub, (x, sstub[1]),
-                                (x, tstub[1]), tstub, tdock])
+                    paths.append([sdock, sstub, (x, sstub[1]),
+                                  (x, tstub[1]), tstub, tdock])
             elif saxis == 0:
-                out.append([sdock, sstub, (tstub[0], sstub[1]), tstub, tdock])
+                paths.append([sdock, sstub, (tstub[0], sstub[1]), tstub, tdock])
             else:
-                out.append([sdock, sstub, (sstub[0], tstub[1]), tstub, tdock])
-    return [_tidy(path) for path in out]
+                paths.append([sdock, sstub, (sstub[0], tstub[1]), tstub, tdock])
+            out += [(_tidy(p), sname, tname, spen + tpen) for p in paths]
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -409,16 +504,17 @@ def _occupy(points: Path, xs: list[int], ys: list[int], used: set) -> None:
                 used.add((1, i, j))
 
 
-def _docks(box: Box, other: Box, index_x: dict, index_y: dict) -> dict:
-    """Причалы, переведённые в узлы сетки: узел -> (ось, штраф, точка)."""
+def _docks(box: Box, other: Box, index_x: dict, index_y: dict,
+           taken: list | None = None) -> dict:
+    """Причалы, переведённые в узлы сетки: узел -> (ось, штраф, точка, сторона)."""
     out: dict = {}
-    for _name, (dock, stub, axis, penalty) in _gates(box, other).items():
+    for name, (dock, stub, axis, penalty) in _gates(box, other, taken).items():
         i = index_x.get(round(stub[0]))
         j = index_y.get(round(stub[1]))
         if i is None or j is None:
             continue
         if (i, j) not in out or penalty < out[(i, j)][1]:
-            out[(i, j)] = (axis, penalty, dock)
+            out[(i, j)] = (axis, penalty, dock, name)
     return out
 
 
@@ -446,7 +542,7 @@ def _search(xs, ys, horizontal, vertical, starts, goals, used, window=None):
     best: dict = {}
     came: dict = {}
     heap: list = []
-    for (i, j), (axis, cost, _dock) in starts.items():
+    for (i, j), (axis, cost, *_rest) in starts.items():
         state = (i, j, axis)
         best[state] = cost
         came[state] = None
@@ -497,11 +593,12 @@ def _search(xs, ys, horizontal, vertical, starts, goals, used, window=None):
     return None, None
 
 
-def _found(src: Box, tgt: Box, mesh: dict, used: set) -> Path | None:
-    """Путь по сетке от одной плашки к другой или None."""
+def _found(src: Box, tgt: Box, mesh: dict, used: set, taken_src: list | None = None,
+           taken_tgt: list | None = None):
+    """Путь по сетке от одной плашки к другой: (маршрут, откуда, куда) или None."""
     xs, ys = mesh["xs"], mesh["ys"]
-    starts = _docks(src, tgt, mesh["ix"], mesh["iy"])
-    goals = _docks(tgt, src, mesh["ix"], mesh["iy"])
+    starts = _docks(src, tgt, mesh["ix"], mesh["iy"], taken_src)
+    goals = _docks(tgt, src, mesh["ix"], mesh["iy"], taken_tgt)
     if not starts or not goals:
         return None
 
@@ -517,9 +614,8 @@ def _found(src: Box, tgt: Box, mesh: dict, used: set) -> Path | None:
         path, hit = _search(xs, ys, mesh["h"], mesh["v"], starts, goals, used)
     if path is None:
         return None
-    dock_in = starts[(mesh["ix"][round(path[0][0])],
-                      mesh["iy"][round(path[0][1])])][2]
-    return _tidy([dock_in] + path + [goals[hit][2]])
+    gate = starts[(mesh["ix"][round(path[0][0])], mesh["iy"][round(path[0][1])])]
+    return _tidy([gate[2]] + path + [goals[hit][2]]), gate[3], goals[hit][3]
 
 
 # --------------------------------------------------------------------------- #
@@ -549,6 +645,8 @@ def reroute(shapes: list[ET.Element], edges: list[ET.Element]) -> tuple[int, int
     for i in live:
         _add(nearby, i, routes[i])
 
+    slots: dict[tuple, list] = {}     # плашка -> занятые причалы
+    place: dict[int, tuple] = {}      # стрелка -> её причалы
     moved: set[int] = set()
     failed = 0
     # второй проход выбирает маршрут, уже зная улучшенных соседей: так
@@ -558,63 +656,92 @@ def reroute(shapes: list[ET.Element], edges: list[ET.Element]) -> tuple[int, int
         used: set = set()
         for i in live:
             failed += _one(i, routes, nearby, boxes, edges, mesh, used, moved,
-                           xs, ys)
+                           xs, ys, slots, place)
     return len(moved), failed
+
+
+def _key(box: Box) -> tuple:
+    return round(box.x), round(box.y), round(box.w), round(box.h)
 
 
 def _one(index: int, routes: list[Path], nearby: dict, boxes: list[Box],
          edges: list[ET.Element], mesh: dict | None, used: set,
-         moved: set[int], xs: list[int], ys: list[int]) -> int:
+         moved: set[int], xs: list[int], ys: list[int],
+         slots: dict, place: dict) -> int:
     """Подбирает маршрут одной стрелке. Возвращает 1, если не вышло."""
     old = routes[index]
     ends = _ends(old, boxes)
     src = _end_box(old[0], boxes, ends)
     tgt = _end_box(old[-1], boxes, ends)
 
+    # свои причалы освобождаем: стрелка выбирает заново, себе она не помеха
+    for key, spot in place.pop(index, ()):
+        if spot in slots.get(key, []):
+            slots[key].remove(spot)
+    src_key, tgt_key = _key(src), _key(tgt)
+    taken_src = slots.get(src_key, [])
+    taken_tgt = slots.get(tgt_key, [])
+
     # сначала выстраиваем варианты по дешёвой мерке и проверяем на плашки
-    # только лучших: перебирать все два десятка целиком незачем
-    ranked: list[tuple[float, int, Path]] = []
+    # только лучших: перебирать всю сотню целиком незачем
+    ranked: list[tuple[float, int, Path, str, str]] = []
     if not _pierced(old, boxes, ends):
-        ranked.append((_cost(old) - KEEP, 0, old))
-    for n, path in enumerate(_simple(src, tgt), start=1):
+        penalty = (SLOT if _busy_at(old[0], taken_src) else 0) + \
+                  (SLOT if _busy_at(old[-1], taken_tgt) else 0)
+        ranked.append((_cost(old) - KEEP + penalty, 0, old,
+                       _side_of(src, old[0]), _side_of(tgt, old[-1])))
+    for n, (path, here, there, penalty) in enumerate(
+            _simple(src, tgt, taken_src, taken_tgt), start=1):
         if len(path) >= 2:
-            ranked.append((_cost(path), n, path))
+            ranked.append((_cost(path) + penalty, n, path, here, there))
     ranked.sort(key=lambda item: (item[0], item[1]))
 
-    # на густой схеме поиск зовём только к совсем ломаным: он дорогой
-    limit = 3 if len(routes) > HEAVY else 2
-
-    clean: list[Path] = []
-    for _score, _n, path in ranked:
+    clean: list[tuple[float, Path, str, str]] = []
+    for score, _n, path, here, there in ranked:
         if _pierced(path, boxes, ends):
             continue
-        clean.append(path)
+        clean.append((score - _cost(path), path, here, there))   # остался штраф
         if len(clean) >= 4:
             break
 
-    # поиск по сетке — когда простого обхода нет или лучший из них ломаный
-    if mesh and (not clean or _bends(clean[0]) >= limit):
-        found = _found(src, tgt, mesh, used)
-        if found and not _pierced(found, boxes, ends):
-            clean.append(found)
+    # на густой схеме поиск зовём только к совсем ломаным: он дорогой
+    limit = 3 if len(routes) > HEAVY else 2
+    if mesh and (not clean or _bends(clean[0][1]) >= limit):
+        found = _found(src, tgt, mesh, used, taken_src, taken_tgt)
+        if found and not _pierced(found[0], boxes, ends):
+            path, here, there = found
+            extra = (SLOT if _busy_at(path[0], taken_src) else 0) + \
+                    (SLOT if _busy_at(path[-1], taken_tgt) else 0)
+            clean.append((extra, path, here, there))
 
     if not clean:
         return 1
 
     best, best_score = clean[0], None
-    for path in clean:
+    for penalty, path, here, there in clean:
         cross, along = _clash(path, nearby, index)
-        score = (_cost(path) + CROSS * cross + OVER * along
-                 - (KEEP if path is old else 0))
+        score = _cost(path) + penalty + CROSS * cross + OVER * along
         if best_score is None or score < best_score:
-            best, best_score = path, score
+            best, best_score = (penalty, path, here, there), score
 
-    if best is not old:
+    _penalty, path, here, there = best
+    # последняя проверка: в одну точку две стрелки не садятся
+    if _busy_at(path[0], taken_src) or _busy_at(path[-1], taken_tgt):
+        fixed = _nudge(_nudge(path, src, taken_src, True), tgt, taken_tgt, False)
+        if fixed is not path and not _pierced(fixed, boxes, ends):
+            path = fixed
+            here, there = _side_of(src, path[0]), _side_of(tgt, path[-1])
+
+    if path is not old:
         _drop(nearby, index, old)
-        _add(nearby, index, best)
-        _set_points(edges[index], best)
-        routes[index] = best
+        _add(nearby, index, path)
+        _set_points(edges[index], path)
+        routes[index] = path
         moved.add(index)
+    place[index] = ((src_key, (here, path[0][0], path[0][1])),
+                    (tgt_key, (there, path[-1][0], path[-1][1])))
+    for key, spot in place[index]:
+        slots.setdefault(key, []).append(spot)
     if mesh:
-        _occupy(best, xs, ys, used)
+        _occupy(path, xs, ys, used)
     return 0
