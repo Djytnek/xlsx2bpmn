@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 import os
+import shutil
 import subprocess
 from pathlib import Path
 import xml.etree.ElementTree as ET
@@ -537,13 +538,17 @@ def merge_layout(xml: str, laid: dict[str, str], meta: dict) -> tuple[str, list[
 def node_places() -> list[Path]:
     """Где может лежать раскладчик на Node — в порядке предпочтения.
 
-    Скрипт едет вместе с пакетом, поэтому после `pip install` он на месте,
-    и `npm install` достаточно сделать один раз в названной папке.
+    Первым идёт bundle.mjs: это тот же bpmn-auto-layout, собранный в один
+    файл вместе с зависимостями. Он едет вместе с пакетом и работает сразу,
+    без npm install и без сети. Остальные пути — на случай, если кто-то
+    поставил раскладчик сам.
     """
     found = [Path(p) for p in (os.getenv("XLSX2BPMN_NODE_SCRIPT"),) if p]
+    here = Path(__file__).parent / "layout-node"
     return found + [
+        here / "bundle.mjs",                        # зашит в пакет
         Path.home() / ".xlsx2bpmn" / "layout-node" / "cli.mjs",
-        Path(__file__).parent / "layout-node" / "cli.mjs",      # рядом с пакетом
+        here / "cli.mjs",
         Path.cwd() / "layout-node" / "cli.mjs",
         Path(__file__).parent.parent / "layout-node" / "cli.mjs",
     ]
@@ -557,10 +562,24 @@ def node_home() -> Path | None:
     return None
 
 
+def _runnable(path: Path) -> bool:
+    """Готов ли скрипт к запуску: бандлу зависимости не нужны, cli.mjs — нужны."""
+    if not path.is_file():
+        return False
+    return path.name == "bundle.mjs" or (path.parent / "node_modules").is_dir()
+
+
+def has_node() -> bool:
+    """Есть ли в системе сам Node. Без него любой bundle бесполезен."""
+    return shutil.which("node") is not None
+
+
 def node_script() -> Path | None:
-    """Ищет готовый к работе раскладчик на Node. Сеть при этом не трогается."""
+    """Ищет готовый к работе раскладчик. Сеть при этом не трогается."""
+    if not has_node():
+        return None
     for path in node_places():
-        if path.is_file() and (path.parent / "node_modules").is_dir():
+        if _runnable(path):
             return path
     return None
 
@@ -585,15 +604,61 @@ def layout_name(choice: str = "auto") -> str:
     """Какой раскладчик будет использован — чтобы писать это в вывод."""
     if choice == "native":
         return "встроенный"
-    if node_script() is not None:
-        return "bpmn-auto-layout"
-    return "недоступен" if choice == "node" else "встроенный"
+    if choice == "node":
+        return "bpmn-auto-layout" if node_script() is not None else "недоступен"
+    return "по схеме" if node_script() is not None else "встроенный"
+
+
+def has_lanes(single_xml: str) -> bool:
+    """Есть ли в процессе дорожки. По ним и выбирается раскладчик."""
+    try:
+        return ET.fromstring(single_xml).find(f".//{B}laneSet") is not None
+    except ET.ParseError:
+        return False
+
+
+def smart_layout(script: Path | None):
+    """Раскладчик по схеме, а не по настроению.
+
+    С дорожками справляется только встроенный: каждой роли своя полоса, и
+    элемент не уезжает в чужую. bpmn-auto-layout про дорожки не знает и
+    выстраивает всё одной строкой — роли перестают совпадать с полосами,
+    а это уже искажение смысла, а не косметика.
+
+    Без дорожек всё наоборот: bpmn-auto-layout ведёт процесс заметно ровнее,
+    его и берём.
+    """
+    from .layout_native import layout_process
+
+    node = node_layout(script) if script else None
+    used: set[str] = set()
+
+    def run(single_xml: str) -> str:
+        if node is not None and not has_lanes(single_xml):
+            used.add("bpmn-auto-layout")
+            return node(single_xml)
+        used.add("встроенный")
+        return layout_process(single_xml)
+
+    run.used = used                     # чтобы вывод показывал, что вышло
+    return run
+
+
+def engine_name(layout_fn, choice: str = "auto") -> str:
+    """Каким раскладчиком схема разложена на самом деле."""
+    used = getattr(layout_fn, "used", None)
+    if used:
+        return " + ".join(sorted(used))
+    return layout_name(choice)
 
 
 def layout_hint(choice: str = "auto") -> str:
     """Подсказка, если схему разложил запасной раскладчик, а лучший не стоит."""
     if choice == "auto" and node_script() is None:
-        return ("  (схему можно вести ровнее: "
+        if not has_node():
+            return ("  (схему без дорожек можно вести ровнее, но для этого "
+                    "нужен Node.js 20+: https://nodejs.org)")
+        return ("  (схему без дорожек можно вести ровнее: "
                 "поставьте раскладчик командой  xlsx2bpmn --setup-layout)")
     return ""
 
@@ -603,7 +668,7 @@ def pick_layout(choice: str = "auto"):
 
     node — bpmn-auto-layout: процесс он ведёт ровнее, но про дорожки не знает.
     native — встроенный: дорожки соблюдает, линию ведёт хуже.
-    auto — node, если установлен, иначе встроенный.
+    auto — по схеме: с дорожками встроенный, без них bpmn-auto-layout.
     """
     from .layout_native import layout_process
 
@@ -617,7 +682,7 @@ def pick_layout(choice: str = "auto"):
                 f"cd {node_home() or 'layout-node'} && npm install. "
                 "Или используйте --layout native")
         return node_layout(script)
-    return node_layout(script) if script else layout_process
+    return smart_layout(script)
 
 
 def strip_lanes(xml: str) -> str:

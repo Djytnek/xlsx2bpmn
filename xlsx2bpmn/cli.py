@@ -21,8 +21,8 @@ from pathlib import Path
 
 from . import __version__
 from .core import SUBPROCESS_TYPES, ConvertError, convert
-from .layout import (LayoutError, apply_layout, layout_hint, layout_name,
-                     node_home, pick_layout)
+from .layout import (LayoutError, apply_layout, engine_name, layout_hint,
+                     layout_name, node_home, node_script, pick_layout)
 from .layout_native import layout_process
 from .render_png import to_png
 from .render_svg import to_svg
@@ -36,7 +36,20 @@ NAME_BAD = re.compile(r'[\\/:*?"<>|]+')
 
 
 def _setup_layout() -> int:
-    """Доустанавливает bpmn-auto-layout. Единственное место, где нужна сеть."""
+    """Запасной путь: доустановить раскладчик из сети.
+
+    Обычно он не нужен — bpmn-auto-layout зашит в пакет одним файлом и
+    работает сразу. Команда пригодится, если этот файл почему-то не подошёл.
+    """
+    if node_script() is not None:
+        print(f"Раскладчик уже работает: {layout_name('node')}. "
+              f"Ничего делать не нужно")
+        return 0
+    if shutil.which("node") is None:
+        print("ERROR не найден Node.js. Поставьте версию 20 или новее: "
+              "https://nodejs.org — после этого раскладчик заработает сам, "
+              "он уже внутри пакета", file=sys.stderr)
+        return 2
     source = node_home()
     if source is None:
         print("ERROR не найден файл раскладчика cli.mjs", file=sys.stderr)
@@ -318,9 +331,10 @@ def _convert_one(path: Path, out: Path, args) -> int:
         return 1
 
     xml = result.xml
-    if not args.no_layout:
+    engine = pick_layout(args.layout) if not args.no_layout else None
+    if engine is not None:
         try:
-            xml, extra = apply_layout(xml, pick_layout(args.layout))
+            xml, extra = apply_layout(xml, engine)
             lines += [f"[файл] WARN  {w}" for w in extra]
         except LayoutError as exc:
             print(f"{path.name}: ERROR раскладка не выполнена: {exc}", file=sys.stderr)
@@ -342,7 +356,7 @@ def _convert_one(path: Path, out: Path, args) -> int:
             s = result.stats
             print(f"OK -> {made[3:]}  элементов {s['nodes']}, потоков {s['flows']}, "
                   f"сообщений {s['message_flows']}, пулов {s['pools']}, "
-                  f"раскладка: {layout_name(args.layout)}"
+                  f"раскладка: {engine_name(engine, args.layout)}"
                   f"{layout_hint(args.layout)}")
         return 0
 
@@ -350,10 +364,10 @@ def _convert_one(path: Path, out: Path, args) -> int:
     picture = _draw(xml, out, args)
     if not args.quiet:
         s = result.stats
-        engine = "нет" if args.no_layout else layout_name(args.layout)
+        name = "нет" if engine is None else engine_name(engine, args.layout)
         print(f"OK -> {out}{picture}  элементов {s['nodes']}, потоков {s['flows']}, "
               f"сообщений {s['message_flows']}, пулов {s['pools']}, "
-              f"раскладка: {engine}"
+              f"раскладка: {name}"
               f"{'' if args.no_layout else layout_hint(args.layout)}")
     return 0
 
@@ -390,8 +404,8 @@ def main() -> int:
     ap.add_argument("--png", action="store_true",
                     help="то же, но растром .png")
     ap.add_argument("--setup-layout", action="store_true",
-                    help="доустановить bpmn-auto-layout — с ним схема ровнее. "
-                         "Единственная команда, которой нужен интернет")
+                    help="проверить раскладчик и, если нужно, доустановить его "
+                         "из сети. Обычно не требуется: он уже внутри пакета")
     ap.add_argument("--template", metavar="PATH",
                     help="создать пустой шаблон таблицы по этому пути и выйти")
     ap.add_argument("--sheet", default=None, help="имя листа (по умолчанию Process)")
@@ -399,9 +413,10 @@ def main() -> int:
     ap.add_argument("--no-layout", action="store_true",
                     help="не расставлять координаты: только структура BPMN")
     ap.add_argument("--layout", choices=["auto", "native", "node"], default="auto",
-                    help="auto (по умолчанию) — bpmn-auto-layout, если установлен, "
-                         "иначе встроенный; native — только встроенный, он "
-                         "единственный понимает дорожки; node — только внешний")
+                    help="auto (по умолчанию) — по схеме: с дорожками встроенный, "
+                         "он единственный их понимает, без дорожек "
+                         "bpmn-auto-layout, он ведёт процесс ровнее. "
+                         "native и node — взять один и тот же принудительно")
     ap.add_argument("--strict", action="store_true",
                     help="предупреждения блокируют генерацию")
     ap.add_argument("--executable", action="store_true")
