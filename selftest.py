@@ -6,6 +6,7 @@ from pathlib import Path
 
 from xlsx2bpmn import apply_layout, convert, layout_process, to_table, to_workbook
 from xlsx2bpmn.layout import DI, B
+from xlsx2bpmn.route import _ends, _pierced, _points, _shape_boxes
 
 TEMPLATE = Path(__file__).parent / "xlsx2bpmn" / "template.xlsx"
 
@@ -70,6 +71,7 @@ def main() -> int:
     print("выгрузка в xlsx читается обратно")
 
     check_subprocesses()
+    check_arrows()
 
     for w in warnings:
         print(f"  предупреждение: {w}")
@@ -138,6 +140,38 @@ def check_subprocesses() -> None:
     twice, _ = apply_layout(again.xml, layout_process)
     assert to_table(twice).table == back.table, "книга с листами исказила схему"
     print(f"субпроцессы: книга разложена по листам {names} и читается обратно")
+
+
+def crossings(xml: str) -> list[str]:
+    """Стрелки, задевающие чужую плашку. Должно быть пусто на любой схеме."""
+    root = ET.fromstring(xml)
+    bad: list[str] = []
+    for plane in root.iter(f"{DI}BPMNPlane"):
+        shapes = [e for e in plane if e.tag == f"{DI}BPMNShape"]
+        edges = [e for e in plane if e.tag == f"{DI}BPMNEdge"]
+        # рамки пулов и полосы дорожек препятствиями не считаются:
+        # поток между дорожками обязан их пересекать
+        boxes = _shape_boxes([s for s in shapes if s.get("isHorizontal") is None])
+        for edge in edges:
+            points = _points(edge)
+            if len(points) < 2:
+                continue
+            if _pierced(points, boxes, _ends(points, boxes)):
+                bad.append(edge.get("bpmnElement", "?"))
+    return bad
+
+
+def check_arrows() -> None:
+    """Главное правило картинки: стрелка не проходит сквозь плашку."""
+    for name, data in (("шаблон", TEMPLATE.read_bytes()),
+                       ("субпроцессы", SUBPROCESS_TABLE.encode("utf-8")),
+                       ("документы", LEVELS_TABLE.encode("utf-8"))):
+        result = convert(data)
+        assert result.ok, [str(i) for i in result.issues]
+        xml, _ = apply_layout(result.xml, layout_process)
+        bad = crossings(xml)
+        assert not bad, f"{name}: стрелки идут сквозь плашки: {bad}"
+    print("стрелки: ни одна не проходит сквозь плашку")
 
 
 LEVELS_TABLE = """id|name|type|pool|lane|parent_id|next|data_in|data_out

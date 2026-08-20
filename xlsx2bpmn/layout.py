@@ -20,7 +20,8 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
-from .core import NS, TARGET_NS
+from .core import NS, SUBPROCESS_TYPES, TARGET_NS
+from .route import reroute
 
 # Геометрия. Значения совпадают с соглашениями bpmn.io.
 DOC_W, DOC_H = 36, 50    # размер значка документа
@@ -175,6 +176,69 @@ def _extract(laid_xml: str) -> tuple[list[ET.Element], list[ET.Element],
     return shapes, edges, diagrams[1:]
 
 
+def _owner(proc: ET.Element) -> dict[str, str]:
+    """id элемента -> id субпроцесса, внутри которого он лежит. '' — верх."""
+    out: dict[str, str] = {}
+
+    def walk(container: ET.Element, parent: str) -> None:
+        for el in container:
+            eid = el.get("id", "")
+            if el.tag.split("}")[-1] in SUBPROCESS_TYPES:
+                out[eid] = parent
+                walk(el, eid)
+            elif eid:
+                out[eid] = parent
+
+    walk(proc, "")
+    return out
+
+
+def _nest(shapes: list[ET.Element], edges: list[ET.Element],
+          owner: dict[str, str]) -> list[ET.Element]:
+    """Уносит содержимое субпроцессов на их собственные полотна.
+
+    Внешний bpmn-auto-layout вложенности не знает и раскладывает содержимое
+    субпроцесса прямо поверх основного потока — элементы оказываются друг на
+    друге. Разносим сами: у каждого субпроцесса своё полотно, как и требует
+    BPMN. Раскладчику, который сделал это сам, здесь разносить уже нечего.
+    """
+    groups: dict[str, list[ET.Element]] = {}
+    for el in shapes + edges:
+        home = owner.get(el.get("bpmnElement", ""), "")
+        if home:
+            groups.setdefault(home, []).append(el)
+
+    out: list[ET.Element] = []
+    for i, (sub_id, members) in enumerate(groups.items(), start=1):
+        for el in members:
+            (shapes if el.tag == f"{DI}BPMNShape" else edges).remove(el)
+        diagram = ET.Element(f"{DI}BPMNDiagram", {"id": f"BPMNDiagram_nest_{i}"})
+        plane = ET.SubElement(diagram, f"{DI}BPMNPlane",
+                              {"id": f"BPMNPlane_nest_{i}", "bpmnElement": sub_id})
+        for el in members:
+            plane.append(el)
+        out.append(diagram)
+    return out
+
+
+def _plane_of(diagram: ET.Element):
+    """Полотно и его содержимое списками, чтобы работать как с главным."""
+    plane = diagram.find(f"{DI}BPMNPlane")
+    if plane is None:
+        return None, [], []
+    return (plane,
+            [e for e in plane if e.tag == f"{DI}BPMNShape"],
+            [e for e in plane if e.tag == f"{DI}BPMNEdge"])
+
+
+def _refill(plane: ET.Element, shapes: list[ET.Element],
+            edges: list[ET.Element]) -> None:
+    for el in list(plane):
+        plane.remove(el)
+    for el in shapes + edges:
+        plane.append(el)
+
+
 def _bbox(shapes: list[ET.Element], edges: list[ET.Element]) -> Box:
     xs: list[float] = []
     ys: list[float] = []
@@ -221,14 +285,15 @@ def _lane_bands(lane_defs: list[tuple[str, str, list[str]]],
 
 
 def _place_data(shapes: list[ET.Element], edges: list[ET.Element],
-                info: dict, warnings: list[str]) -> None:
+                info: dict, warnings: list[str], mark: str = "") -> set[str]:
     """Ставит значки документов над задачами и рисует ассоциации.
 
-    Раскладчик может не поставить фигуру документа и не развести ассоциации —
-    обрабатываются оба случая.
+    Вызывается для каждого полотна отдельно: документ рисуется там, где лежит
+    его задача, — в том числе внутри субпроцесса. Возвращает документы,
+    которые на этом полотне поставлены.
     """
-    if not info or not info["refs"]:
-        return
+    if not info or not info.get("refs"):
+        return set()
 
     # У самого dataObject фигуры быть не должно — рисуется только ссылка.
     # Заодно выбрасываем фигуры документов, которые расставил раскладчик:
@@ -257,9 +322,11 @@ def _place_data(shapes: list[ET.Element], edges: list[ET.Element],
                        for t in taken)
 
     taken: list[Box] = list(boxes.values())
+    placed: set[str] = set()
     for ref_id, name in info["refs"]:
         if ref_id in boxes:                      # раскладчик уже поставил
             taken.append(boxes[ref_id])
+            placed.add(ref_id)
             continue
         # документ ставим над той задачей, которая его создаёт; если создателя
         # нет — над первой, которая его читает
@@ -269,9 +336,7 @@ def _place_data(shapes: list[ET.Element], edges: list[ET.Element],
                    if r == ref_id and d == "in" and a in boxes]
         anchor = (makers or readers)[:1]
         if not anchor:
-            warnings.append(f"документ {name or ref_id!r} не привязан ни к одной "
-                            f"разложенной задаче, значок не поставлен")
-            continue
+            continue                         # его задача на другом полотне
         x = anchor[0].cx - DOC_W / 2
         above = anchor[0].y - DOC_GAP
         below = anchor[0].bottom + DOC_GAP - DOC_H
@@ -297,8 +362,12 @@ def _place_data(shapes: list[ET.Element], edges: list[ET.Element],
                             f"фигур: свободного места рядом с задачей не нашлось")
         taken.append(box)
         boxes[ref_id] = box
+        placed.add(ref_id)
 
-        shape = ET.Element(f"{DI}BPMNShape", {"id": f"{ref_id}_di", "bpmnElement": ref_id})
+        # документ, нужный сразу двум уровням, рисуется на каждом полотне,
+        # поэтому id фигуры помечается полотном — они обязаны быть разными
+        shape = ET.Element(f"{DI}BPMNShape",
+                           {"id": f"{ref_id}_di{mark}", "bpmnElement": ref_id})
         ET.SubElement(shape, f"{DC}Bounds", {
             "x": _num(box.x), "y": _num(box.y),
             "width": _num(DOC_W), "height": _num(DOC_H)})
@@ -308,12 +377,19 @@ def _place_data(shapes: list[ET.Element], edges: list[ET.Element],
         if ref_id not in boxes or act_id not in boxes:
             continue
         doc, act = boxes[ref_id], boxes[act_id]
-        pts = ([(doc.cx, doc.bottom), (act.cx, act.y)] if direction == "in"
-               else [(act.cx, act.y), (doc.cx, doc.bottom)])
+        # причаливаем с той стороны, где документ на самом деле стоит,
+        # иначе линия к документу под задачей прошивает саму задачу
+        if doc.cy <= act.cy:
+            at_doc, at_act = (doc.cx, doc.bottom), (act.cx, act.y)
+        else:
+            at_doc, at_act = (doc.cx, doc.y), (act.cx, act.bottom)
+        pts = [at_doc, at_act] if direction == "in" else [at_act, at_doc]
         edge = ET.Element(f"{DI}BPMNEdge", {"id": f"{assoc_id}_di", "bpmnElement": assoc_id})
         for x, y in pts:
             ET.SubElement(edge, f"{D}waypoint", {"x": _num(x), "y": _num(y)})
         edges.append(edge)
+
+    return placed
 
 
 def _message_waypoints(src: Box, tgt: Box) -> list[tuple[float, float]]:
@@ -332,13 +408,30 @@ def merge_layout(xml: str, laid: dict[str, str], meta: dict) -> tuple[str, list[
     root = ET.fromstring(xml)
     order = [p.get("id", "") for p in root.findall(f"{B}process")]
 
+    owners = {p.get("id", ""): _owner(p) for p in root.findall(f"{B}process")}
+
     parsed: dict[str, tuple[list[ET.Element], list[ET.Element], Box]] = {}
     nested: list[ET.Element] = []
     for pid in order:
         if pid not in laid:
             raise LayoutError(f"нет результата раскладки для процесса {pid!r}")
         shapes, edges, extra = _extract(laid[pid])
-        _place_data(shapes, edges, meta.get("data", {}).get(pid, {}), warnings)
+        extra += _nest(shapes, edges, owners.get(pid, {}))
+
+        info = meta.get("data", {}).get(pid, {})
+        placed = _place_data(shapes, edges, info, warnings)
+        for diagram in extra:
+            plane, in_shapes, in_edges = _plane_of(diagram)
+            if plane is None:
+                continue
+            placed |= _place_data(in_shapes, in_edges, info, warnings,
+                                  mark=f"_{plane.get('bpmnElement', '')}")
+            _refill(plane, in_shapes, in_edges)
+        for ref_id, name in info.get("refs", []):
+            if ref_id not in placed:
+                warnings.append(f"документ {name or ref_id!r} не привязан ни к одной "
+                                f"разложенной задаче, значок не поставлен")
+
         parsed[pid] = (shapes, edges, _bbox(shapes, edges))
         nested += extra
 
@@ -409,6 +502,12 @@ def merge_layout(xml: str, laid: dict[str, str], meta: dict) -> tuple[str, list[
             ET.SubElement(edge, f"{D}waypoint", {"x": _num(x), "y": _num(y)})
         all_edges.append(edge)
 
+    # ни одна стрелка не имеет права идти сквозь плашку
+    _, stuck = reroute(all_shapes, all_edges)
+    if stuck:
+        warnings.append(f"стрелок не удалось провести в обход фигур: {stuck}; "
+                        f"схема слишком плотная, они оставлены как были")
+
     for old in root.findall(f"{DI}BPMNDiagram"):
         root.remove(old)
 
@@ -421,6 +520,10 @@ def merge_layout(xml: str, laid: dict[str, str], meta: dict) -> tuple[str, list[
 
     for i, extra in enumerate(nested, start=1):     # полотна субпроцессов
         extra.set("id", f"BPMNDiagram_sub_{i}")
+        inner = extra.find(f"{DI}BPMNPlane")
+        if inner is not None:
+            reroute([e for e in inner if e.tag == f"{DI}BPMNShape"],
+                    [e for e in inner if e.tag == f"{DI}BPMNEdge"])
         root.append(extra)
 
     ET.indent(root, space="  ")

@@ -8,3 +8,4 @@ wheels/
 *.bpmn
 *.svg
 owui/вывод/
+node_modules/
