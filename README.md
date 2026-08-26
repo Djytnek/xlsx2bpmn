@@ -35,7 +35,8 @@ bpmn2xlsx process.bpmn  →  process.xlsx      разобрать её обра�
 | `xlsx2bpmn/cli.py` | консольная утилита, обе команды |
 | `xlsx2bpmn/template.xlsx` | шаблон таблицы с заполненным примером |
 | `xlsx2bpmn/read_doc.py` | чтение описания процесса из docx, pdf и прочего |
-| `xlsx2bpmn/prompt.md` | промпт для генерации таблицы языковой моделью |
+| `xlsx2bpmn/prompt.md` | промпт: описание процесса → таблица |
+| `xlsx2bpmn/prompt-back.md` | промпт обратно: таблица → описание процесса |
 | `owui/` | функция для Open WebUI и инструкция по установке |
 | `xlsx2bpmn/layout-node/` | раскладчик bpmn-auto-layout, зашит одним файлом |
 | `selftest.py` | проверка работоспособности |

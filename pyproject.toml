@@ -26,7 +26,8 @@ packages = ["xlsx2bpmn"]
 version = {attr = "xlsx2bpmn.__version__"}
 
 [tool.setuptools.package-data]
-xlsx2bpmn = ["template.xlsx", "prompt.md", "DejaVuSans.ttf",
+xlsx2bpmn = ["template.xlsx", "prompt.md", "prompt-back.md",
+             "DejaVuSans.ttf",
              "layout-node/bundle.mjs", "layout-node/cli.mjs",
              "layout-node/package.json", "layout-node/README.md",
              "layout-node/THIRD-PARTY.md"]
